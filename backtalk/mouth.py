@@ -351,6 +351,19 @@ def _voices() -> dict:
     return v if isinstance(v, dict) and v else {"en": CFG.get("voice") or "bm_lewis"}
 
 
+# The languages Kokoro can actually speak in its own voice. Derived from
+# what the model ships with, NOT from the voices table: that table also
+# carries read-in-English entries for languages Kokoro has no voice for,
+# so testing membership against it says "German is fine" when it is not.
+KOKORO_LANGS = ("en", "es", "fr", "hi", "it", "ja", "pt", "zh")
+
+
+def kokoro_langs() -> tuple:
+    """Languages Kokoro renders natively. Anything else goes to espeak-ng
+    so it is spoken in its own language instead of an English accent."""
+    return KOKORO_LANGS
+
+
 def voice_for(lang: str | None) -> str:
     """The voice for a language, falling back to the English default.
 
@@ -636,7 +649,7 @@ def synth_stream(text: str, timeout: float = 30.0):
                 f"falling back to {CFG['voice']}")
 
     spoken = detect_language(text, lang)
-    if spoken and spoken not in _voices() and espeak_voice_for(spoken):
+    if spoken and spoken not in kokoro_langs() and espeak_voice_for(spoken):
         try:
             chunks = list(_stream_espeak(text, spoken))
             if chunks:

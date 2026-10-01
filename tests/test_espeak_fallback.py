@@ -13,6 +13,12 @@ import numpy as np                                   # noqa: E402
 from backtalk import mouth                          # noqa: E402
 
 NO_KOKORO = [
+    # German is the regression that motivated this list. It HAS an entry in
+    # the voices table (an English fallback), so an earlier version asked
+    # "is this language in voices?" and answered yes -- reading German aloud
+    # in a British accent instead of speaking it. Membership must be judged
+    # against what Kokoro actually ships, not against that table.
+    ("de", "Guten Morgen, ich habe eine Frage fuer dich."),
     ("ta", "வணக்கம், தயவுசெய்து நோட்டபாட் திறக்க முடியுமா?"),
     ("ko", "안녕하세요, 메모장을 열어 주세요."),
     ("ar", "مرحبا، افتح المفكرة من فضلك."),
