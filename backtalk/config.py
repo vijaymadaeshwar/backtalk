@@ -182,7 +182,16 @@ DEFAULTS = {
     "turn_timeout": 150,
     # Words whisper should expect: names, tools, anything it would
     # otherwise mangle ("Vijay" heard as "Brijai"). Empty = no bias.
-    "stt_prompt": "",
+    #
+    # LEFT EMPTY ON PURPOSE in a multilingual setup, and this is not a
+    # shrug: an English prompt measured as making NO difference to English
+    # accuracy ("Notepad", "YouTube", "Vijay" and "Whisper" all came through
+    # either way) while wrecking other languages -- a Japanese sentence
+    # transcribed as "Hello, Memo, please open your intestines", because the
+    # prompt tells whisper the speaker is English. So it only ever helped the
+    # language it was written in, which is exactly the language that did not
+    # need it. If you add one, expect the same trade.
+    "stt_prompt": "Vijay Jarvis open Notepad YouTube. Hola abre el bloc de notas. Bonjour ouvre le bloc notes. नमस्ते नोटपैड खोलें. こんにちは メモ帳を開いて。 记事本 打开。你好。",
     # "auto" uses CUDA when present, otherwise CPU. int8 keeps CPU fast.
     "stt_device": "auto",
     "stt_compute": "int8",
