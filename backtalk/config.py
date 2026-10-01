@@ -1,4 +1,4 @@
-# backtalk: talk to your Claude Code agent out loud.
+# backtalk: talk to your opencode agent out loud.
 # Copyright (C) 2026 Jared Rhodenizer
 #
 # This program is free software: you can redistribute it and/or modify
@@ -18,13 +18,14 @@
 """Configuration — backtalk.json in the repo root, merged over defaults.
 
 backtalk deliberately owns NO personality. Your agent's identity lives in
-the CLAUDE.md of whatever folder `agent_dir` points at — backtalk just
+the AGENTS.md of whatever folder `agent_dir` points at — backtalk just
 gives that agent a mouth and ears. The only voice-related instruction it
 adds is the spoken-delivery discipline below, which is about the MEDIUM
 (writing for the ear), never the character.
 """
 import json
 import os
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -35,25 +36,25 @@ REPO = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(os.environ.get("BACKTALK_CONFIG") or (REPO / "backtalk.json"))
 
 DEFAULTS = {
-    # The folder whose CLAUDE.md defines WHO your agent is. The voice
-    # session runs there, so it's the same assistant as your terminal
-    # sessions — same name, same personality, same memory.
+    # The folder whose AGENTS.md (or CLAUDE.md) defines WHO your agent is.
+    # The voice session runs there, so it's the same assistant as your
+    # terminal sessions — same name, same personality, same memory.
     "agent_dir": "~",
     # Display name, used in logs and to build the quit phrases
     # ("goodbye <name>" hangs up). Match your agent's actual name.
     "name": "Assistant",
-    # The brain. Full model id ON PURPOSE — never a bare alias like
-    # "sonnet": the SDK resolves aliases through its own bundled CLI and
-    # can silently land on an older model. The fast tier is most of the
-    # speed difference people ask about; a deep-work model makes every
-    # reply noticeably slower and burns usage doing it.
-    "model": "claude-sonnet-5",
+    # The brain, in opencode's "provider/model-id" form. The FULL id on
+    # purpose: opencode model ids are namespaced by the provider AND often
+    # carry their own prefix, and a bare name is ambiguous. List yours with
+    # `opencode models <provider>`. The fast tier is most of the speed
+    # difference people ask about; a deep-work model makes every reply
+    # noticeably slower and burns usage doing it.
+    "model": "nvidia/nvidia/nemotron-3-super-120b-a12b",
     # The deep-work model for the voice console's "switch to the deep
-    # model" command ("back to the fast model" returns to "model"
-    # above). Full id ON PURPOSE, same reasoning as "model". The switch
-    # lasts one session and is always spoken; this default never moves
-    # by itself.
-    "deep_model": "claude-opus-5",
+    # model" command ("back to the fast model" returns to "model" above).
+    # Full id ON PURPOSE, same reasoning as "model". The switch lasts one
+    # session and is always spoken; this default never moves by itself.
+    "deep_model": "nvidia/nvidia/nemotron-3-super-120b-a12b",
     # Tool permissions for the voice session. "ask" is the default ON
     # PURPOSE (safety is opt-out, never opt-in): when the agent wants a
     # gated tool (write a file, run a real command), it ASKS OUT LOUD
@@ -86,6 +87,15 @@ DEFAULTS = {
     # Extra folders the agent may access beyond agent_dir (e.g. your
     # notes vault). Absolute paths or ~ paths.
     "extra_dirs": [],
+    # The opencode HTTP server backtalk talks to. It starts its own on
+    # this port if nothing is listening, and REUSES a running server if
+    # something already is — so starting opencode yourself first is fine
+    # and just saves a spawn. Only ever bound to loopback.
+    "opencode_port": 4599,
+    # The opencode executable, when it isn't on PATH. "" means "find it
+    # on PATH" (the normal case). Set an absolute path only if backtalk
+    # can't see it — e.g. "C:\\Users\\you\\AppData\\Roaming\\npm\\opencode.cmd".
+    "opencode_bin": "",
     # Hold-to-talk key. Named keys ("home", "f13", "right_alt", ...)
     # or a single character.
     "ptt_key": "home",
@@ -115,26 +125,64 @@ DEFAULTS = {
     # A resume that fails falls back to a fresh session and says so in
     # the log. (Grew out of the same community proposal, issue #1.)
     "resume_last_session": False,
-    # Publish your Claude usage (the five-hour and weekly windows) on the
-    # signal bus so a face can draw it. OFF by default and deliberately
-    # so: this is your own account spend, and the faces this feeds are
-    # frequently on a stream or a shared screen. Nothing is collected at
-    # all while this is false. (Community fix, ai-visualizer issue #1.)
+    # Publish your usage on the signal bus so a face can draw it. OFF by
+    # default and deliberately so: this is your own account spend, and the
+    # faces this feeds are frequently on a stream or a shared screen.
+    # Nothing is collected at all while this is false. (Community fix,
+    # ai-visualizer issue #1.)
     "show_usage": False,
     # Reasoning effort for the voice session: "" inherits the model's
     # default; "low" / "medium" / "high" / "max" applies at launch.
     # Saying "set effort to X" in a voice session saves itself here.
     "effort": "",
+    # The opencode agent that answers a voice turn. "build" is the default
+    # agent; "plan" is the read-only one. List yours with `opencode agent`.
+    "agent": "build",
     # The voice (Kokoro, local, free). bm_lewis is the proven default —
     # British male, the butler register. Others: bm_george, bm_daniel,
     # bm_fable, am_michael, af_heart... The first letter picks the
     # language pipeline (a=American, b=British, e/f/h/i/j/p/z = other
     # languages), so keep voice and accent matched.
     "voice": "bm_lewis",
+    # Per-language voices. "voice" above stays the English default.
+    # The mouth reads the language your reply is written in and loads the
+    # matching voice, so a Spanish answer is spoken in Spanish. Keys are
+    # Whisper's own language codes; the value is a Kokoro voice name whose
+    # first letter IS the pipeline to load. 54 voices across 9 languages
+    # ship with the model, so add a key here any time you want another
+    # accent. Remove a key and that language simply falls back to English.
+    "voices": {
+        "en": "bm_lewis",    # British, the butler register
+        "es": "em_alex",     # Spanish
+        "fr": "ff_siwis",    # French
+        "hi": "hm_omega",    # Hindi
+        "it": "im_nicola",   # Italian
+        "ja": "jm_kumo",     # Japanese
+        "pt": "pm_alex",     # Portuguese
+        "zh": "zf_xiaoxiao", # Mandarin
+        "de": "bm_lewis",    # no German voice ships: speaks it, reads as English
+    },
     # Speech recognition (faster-whisper, local, free).
-    # Models: tiny.en / base.en / small.en / medium.en — small.en is the
-    # accuracy/speed sweet spot on a normal machine.
-    "stt_model": "small.en",
+    # NOTE: the plain multilingual models, not the ".en" ones. The ".en"
+    # variants are English-only, which is what used to make Jarvis
+    # mishear every other language as English and answer in English.
+    # tiny / base / small / medium — small is the accuracy/speed sweet
+    # spot on a normal machine, and it auto-detects the language.
+    "stt_model": "small",
+    # Used instead of stt_model once its weights are already on this
+    # machine. Set to a model you have downloaded; until then the smaller
+    # one is used so the first utterance never waits on a fetch.
+    "stt_model_if_cached": "medium",
+    # Fetch live facts in code for time-sensitive questions, so the model
+    # never has to answer about the present out of its own memory.
+    "live_data": True,
+    # How long one turn may run before it is abandoned. A provider that
+    # stops streaming used to hold the turn for 600s, which reads as a
+    # dead assistant; this gives up, resets the turn, and stays usable.
+    "turn_timeout": 150,
+    # Words whisper should expect: names, tools, anything it would
+    # otherwise mangle ("Vijay" heard as "Brijai"). Empty = no bias.
+    "stt_prompt": "",
     # "auto" uses CUDA when present, otherwise CPU. int8 keeps CPU fast.
     "stt_device": "auto",
     "stt_compute": "int8",
@@ -204,18 +252,18 @@ DEFAULTS = {
     "signoff": "Voice line closing. I'll be here when you need me.",
     # Appended to the spoken-delivery discipline below. The discipline covers
     # the MEDIUM (write for the ear, no markdown, keep it short); your agent's
-    # CLAUDE.md covers the character. Use this for a note that belongs to
+    # AGENTS.md covers the character. Use this for a note that belongs to
     # neither, e.g. a rule that only applies when it is speaking.
     "discipline_append": "",
 }
 
 # The spoken-delivery discipline — the MEDIUM half of what used to be a
 # persona. The CHARACTER half deliberately is not here: it's whatever
-# lives in the agent_dir's CLAUDE.md. One identity, one place.
+# lives in the agent_dir's AGENTS.md. One identity, one place.
 DISCIPLINE = (
     "VOICE SESSION (your reply is spoken aloud through a TTS engine, "
     "not displayed): you are SPEAKING, in your own voice and "
-    "personality — your CLAUDE.md is who you are. The TTS engine "
+    "personality — your AGENTS.md is who you are. The TTS engine "
     "PERFORMS your punctuation, so write like a performance, never "
     "like a memo: contractions always, punchy conversational "
     "sentences, and if a line could open a quarterly report, rewrite "
@@ -242,6 +290,38 @@ DISCIPLINE = (
     "for the NEXT launch."
 )
 
+DISCIPLINE = DISCIPLINE + " " + (
+    "LANGUAGE. Whatever language he speaks to you in, you answer in "
+    "that same language, in its ordinary written form, and nothing more. "
+    "Spanish in, Spanish out; Tamil in, Tamil out. A reply in a language "
+    "he did not use is a failure, even when the content is right. Never "
+    "announce that you are switching, never name the language, and never "
+    "ask which language he prefers: he already chose by speaking. Write "
+    "it for the ear in that language, which means short spoken "
+    "sentences, no lists, no markdown, and no spelling out letters. If "
+    "you are not confident in a language, answer in English rather than "
+    "producing broken sentences in it."
+)
+
+DISCIPLINE = DISCIPLINE + " " + (
+    "LIVE INFORMATION, this is not optional. Right now it is "
+    + time.strftime("%A, %d %B %Y at %H:%M")
+    + " local time, and that is the only source of truth for what day it "
+    "is. Your training does not cover the present, so never answer a "
+    "question about the present out of your own memory. The assistant "
+    "fetches live facts for you before you answer anything time "
+    "sensitive, and those facts arrive attached to the question, marked "
+    "as fetched just now. When they arrive, answer only from them and "
+    "speak the source's name so the person knows how fresh it is. When "
+    "no such facts arrive, nothing was looked up: answer the question "
+    "normally, and never mention a lookup, a fetch, live data, or the "
+    "news, because none of that happened. If the question is a vague "
+    "follow up that refers to something you were just talking about, or "
+    "is too vague to answer, simply ask what he means in plain words. "
+    "Never say the words live lookup or live data out loud. Never "
+    "invent a figure, a date, a quote, or a source."
+)
+
 
 def _expand(p: str) -> str:
     return os.path.expanduser(p) if p else p
@@ -250,7 +330,10 @@ def _expand(p: str) -> str:
 def load() -> dict:
     cfg = json.loads(json.dumps(DEFAULTS))          # deep copy
     try:
-        user = json.loads(CONFIG_PATH.read_text())
+        # utf-8-sig, not utf-8: Windows editors love to save a BOM, and a
+        # BOM is not JSON, so the file would otherwise be reported as
+        # invalid on the one character that isn't wrong.
+        user = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
         for k, v in user.items():
             if isinstance(v, dict) and isinstance(cfg.get(k), dict):
                 cfg[k].update(v)
@@ -287,6 +370,6 @@ def load() -> dict:
 
 CFG = load()
 
-# The character half stays in YOUR agent's CLAUDE.md. This is the medium.
+# The character half stays in YOUR agent's AGENTS.md. This is the medium.
 if CFG.get("discipline_append"):
     DISCIPLINE = DISCIPLINE + " " + str(CFG["discipline_append"]).strip()

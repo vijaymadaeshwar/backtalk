@@ -1,4 +1,4 @@
-# backtalk: talk to your Claude Code agent out loud.
+﻿# backtalk: talk to your opencode agent out loud.
 # Copyright (C) 2026 Jared Rhodenizer
 #
 # This program is free software: you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The ears — mic capture with VAD endpointing, transcribed in-process
+"""The ears â€” mic capture with VAD endpointing, transcribed in-process
 by faster-whisper. Local, free, no server, no API key.
 
 record_held() is the hold-to-talk capture (the button is the VAD).
@@ -25,10 +25,12 @@ an utterance opens after ~120ms of sustained speech, closes after
 `silence_ms` of trailing quiet. A `gate` callable can suppress
 listening (so the open mic ignores the speakers unless barge-in is on).
 """
+import os
 import platform
 import re
 import sys
 import threading
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
@@ -75,6 +77,75 @@ def _apple_gpu_available() -> bool:
 def _mlx_repo(model_name: str) -> str:
     """A faster-whisper model name -> its MLX conversion on the Hub."""
     return f"mlx-community/whisper-{model_name}-mlx"
+
+
+def _resolve_stt_model() -> str:
+    """The best STT model that is actually on this machine.
+
+    A bigger model only helps if its weights are already downloaded, and
+    asking for an absent one stalls the first utterance on a fetch. So a
+    preferred model is used only once its files are present locally, which
+    means accuracy rises the moment a download finishes, with no config
+    edit and no risk of a slow first turn.
+    """
+    want = str(CFG.get("stt_model") or "small.en")
+    better = CFG.get("stt_model_if_cached")
+    if not better or better == want:
+        return want
+    if _stt_cached(better):
+        return better
+    return want
+
+
+def _hf_cache_dir(name: str) -> Path:
+    """Where faster-whisper keeps a model's weights.
+
+    The downloader writes them flat into models--<repo>; huggingface's own
+    loader instead uses snapshots/<hash>/. Both count as downloaded, and
+    both spell the repo differently -- "medium" is really
+    Systran/faster-whisper-medium -- so check every form.
+    """
+    root = Path(os.path.expanduser(r"~\.cache\huggingface\hub"))
+    name = str(name)
+    repos = []
+    if "/" in name:
+        repos.append(name)
+    else:
+        base = name[:-3] if name.endswith(".en") else name
+        repos.append(f"Systran/faster-whisper-{base}")
+        repos.append(f"Systran/faster-whisper-{name}")
+    for repo in repos:
+        folder = "models--" + repo.replace("/", "--")
+        flat = root / folder
+        if (flat / "model.bin").exists() and (flat / "config.json").exists():
+            return flat
+        snap = root / folder / "snapshots"
+        if snap.is_dir():
+            for child in snap.iterdir():
+                if ((child / "model.bin").exists()
+                        and (child / "config.json").exists()):
+                    return child
+    return root / "models--" + repos[0].replace("/", "--")
+
+
+def _stt_cached(name: str) -> bool:
+    d = _hf_cache_dir(name)
+    return ((d / "model.bin").exists() and (d / "config.json").exists()
+            and (d / "tokenizer.json").exists())
+
+
+_stt_cache = None
+
+
+def _stt() -> str:
+    """Resolved once: the model name is fixed for the life of the process."""
+    global _stt_cache
+    if _stt_cache is None:
+        _stt_cache = _resolve_stt_model()
+    return _stt_cache
+
+
+_last_lang = None
 
 
 _mic_checked = False
@@ -264,8 +335,9 @@ def _probe(model):
     work until it is iterated, so the list() is what actually exercises
     the backend and is not redundant.
     """
+    probe_lang = str(CFG.get("stt_language") or "").strip().lower() or None
     segments, _ = model.transcribe(np.zeros(RATE // 10, dtype=np.float32),
-                                   language="en")
+                                   language=probe_lang or "en")
     list(segments)
 
 
@@ -279,8 +351,8 @@ def warm():
         if _model is None:
             if _apple_gpu_available():
                 import mlx_whisper
-                repo = _mlx_repo(CFG["stt_model"])
-                log(f"[ears] loading {CFG['stt_model']} on the Apple GPU...")
+                repo = _mlx_repo(_stt())
+                log(f"[ears] loading {_stt()} on the Apple GPU...")
                 # This API has no separate load call: the first transcribe
                 # pulls and caches the weights. Warm on a beat of silence so
                 # the first real utterance does not pay for it.
@@ -291,9 +363,9 @@ def warm():
             else:
                 from faster_whisper import WhisperModel
                 want = CFG["stt_device"]
-                log(f"[ears] loading {CFG['stt_model']} "
+                log(f"[ears] loading {_stt()} "
                     f"({want}/{CFG['stt_compute']})...")
-                _model = WhisperModel(CFG["stt_model"], device=want,
+                _model = WhisperModel(_stt(), device=want,
                                       compute_type=CFG["stt_compute"])
                 # PROVE the device before the greeting, not at the first
                 # spoken sentence. WhisperModel CONSTRUCTS perfectly well
@@ -315,7 +387,7 @@ def warm():
                     log("[ears] falling back to the CPU. Set "
                         "\"stt_device\": \"cpu\" in backtalk.json to skip "
                         "this check in future.")
-                    _model = WhisperModel(CFG["stt_model"], device="cpu",
+                    _model = WhisperModel(_stt(), device="cpu",
                                           compute_type=CFG["stt_compute"])
                     _probe(_model)
                 _backend = "faster-whisper"
@@ -326,19 +398,42 @@ def warm():
 def transcribe(pcm: np.ndarray) -> str:
     """int16 mono 16kHz -> text. Bracketed non-speech markers that
     whisper emits ([BLANK_AUDIO], [SIGHS], (coughs)...) are stripped;
-    if nothing remains, it was silence."""
+    if whatever remains is silence."""
+    return transcribe_language(pcm)[0]
+
+
+def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
+    """transcribe(), plus the language whisper itself detected.
+
+    The code is None only when a caller forces English. This is what makes
+    Jarvis reply in kind: the ear hands the detected language to the mouth
+    so a Spanish answer is spoken by a Spanish voice.
+    """
     model = warm()
     audio = pcm.astype(np.float32) / 32768.0
-    lang = "en" if CFG["stt_model"].endswith(".en") else None
+    # The ".en" models are English-only and cannot detect anything, so
+    # they must be TOLD "en". The multilingual ones detect on their own,
+    # which is the entire reason they are used.
+    forced = str(CFG.get("stt_language") or "").strip().lower() or None
+    lang = forced if forced else ("en" if _stt().endswith(".en") else None)
+    hint = (CFG.get("stt_prompt") or "").strip() or None
+    detected = None
     if _backend == "mlx":
         import mlx_whisper
-        text = mlx_whisper.transcribe(audio, path_or_hf_repo=model,
-                                      temperature=0.0, language=lang,
-                                      verbose=None)["text"].strip()
+        res = mlx_whisper.transcribe(audio, path_or_hf_repo=model,
+                                     temperature=0.0, language=lang,
+                                     initial_prompt=hint,
+                                     verbose=None)
+        text = res["text"].strip()
+        detected = res.get("language")
     else:
-        segments, _ = model.transcribe(audio, temperature=0.0, language=lang)
+        segments, info = model.transcribe(audio, temperature=0.0,
+                                          language=lang, initial_prompt=hint)
         text = "".join(s.text for s in segments).strip()
-    return _NONSPEECH.sub("", text).strip()
+        detected = getattr(info, "language", None)
+    global _last_lang
+    _last_lang = detected or lang or None
+    return _NONSPEECH.sub("", text).strip(), _last_lang
 
 
 class Ears:
@@ -395,7 +490,7 @@ class Ears:
                        len(frames) * FRAME_MS / 1000 > MAX_UTTER_S:
                         if speech_total < 8:
                             # <240ms of actual speech: a noise blip, not
-                            # a sentence — keep listening
+                            # a sentence â€” keep listening
                             in_utterance = False
                             frames, ring = [], []
                             speech_run = speech_total = 0
@@ -403,9 +498,14 @@ class Ears:
                         return transcribe(np.concatenate(frames))
 
 
+def last_language() -> str | None:
+    """Whisper's code for the language spoken most recently, or None."""
+    return _last_lang
+
+
 def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25) -> str | None:
     """Hold-to-talk capture: record raw audio while is_held() is True,
-    then transcribe. The button is the VAD — no endpointing. Returns
+    then transcribe. The button is the VAD â€” no endpointing. Returns
     None for taps shorter than min_s (accidental presses)."""
     frames: list[np.ndarray] = []
     with _open_mic() as stream:
@@ -423,7 +523,7 @@ def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25) -> str | None
 
 if __name__ == "__main__":
     import time
-    print("[ears] listening — say something...", flush=True)
+    print("[ears] listening â€” say something...", flush=True)
     ears = Ears()
     start = time.time()
     while time.time() - start < 30:
@@ -434,4 +534,4 @@ if __name__ == "__main__":
         if text is None:
             print("[ears] timed out with no speech", flush=True)
             break
-        print("[ears] (noise/empty — still listening)", flush=True)
+        print("[ears] (noise/empty â€” still listening)", flush=True)

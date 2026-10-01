@@ -1,4 +1,4 @@
-# backtalk: talk to your Claude Code agent out loud.
+# backtalk: talk to your opencode agent out loud.
 # Copyright (C) 2026 Jared Rhodenizer
 #
 # This program is free software: you can redistribute it and/or modify
@@ -15,10 +15,10 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""backtalk — talk to your Claude Code agent out loud.
+"""backtalk — talk to your opencode agent out loud.
 
 Flow: hold the key and speak -> local transcription -> your agent's warm
-Claude session streams the reply -> sentences go to the mouth the moment
+opencode session streams the reply -> sentences go to the mouth the moment
 they complete (~1-2s to first audio on warm turns). The greeting plays
 over a hidden warmup query so the first real turn is already hot.
 
@@ -211,8 +211,8 @@ def _full_detail(tool, tool_input, ctx):
 
 
 def make_permission_gate(mouth):
-    from claude_agent_sdk import (PermissionResultAllow,
-                                  PermissionResultDeny)
+    from backtalk.permresult import (PermissionResultAllow,
+                                     PermissionResultDeny)
 
     async def gate(tool, tool_input, ctx):
         if _AUTOAPPROVE["on"]:
@@ -609,13 +609,18 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
             log(f"[{NAME}] ({time.time()-t0:.1f}s to first) {s}"
                 + (f"  <directions: {pending}>" if pending else ""))
             mouth.say_chunk(s, pending)
+            signals.caption(s)
             pending = []
             first = False
         else:
             log(f"[{NAME}] {s}" + (f"  <directions: {pending}>" if pending else ""))
             batch.append(s)
             if len(batch) >= 2:
-                mouth.say_chunk(" ".join(batch), pending)
+                spoken = " ".join(batch)
+                mouth.say_chunk(spoken, pending)
+                # Caption what is going audible now, so a display shows the
+                # reply as it is spoken rather than after it finishes.
+                signals.caption(spoken)
                 pending = []
                 batch = []
 
@@ -623,13 +628,25 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
         async for sentence in brain.ask_stream(text):
             emit(sentence)
         if batch:
-            mouth.say_chunk(" ".join(batch), pending)
+            tail = " ".join(batch)
+            mouth.say_chunk(tail, pending)
             pending = []
+            batch = []
+            # The last partial batch is still audio the listener will hear,
+            # so it gets captioned like every other one.
+            signals.caption(tail)
         if first:
             # Zero sentences yielded (brain error / empty turn): nothing
             # will ever dequeue, so nothing resets the bus — park it here.
             signals.static_stop()
             signals.set_state("idle")
+            signals.caption_clear()
+        # NOTE: the caption is deliberately NOT cleared here. Queueing a
+        # sentence is not the same as playing it: the model can finish a
+        # reply seconds before the audio reaches the speakers, so clearing
+        # on queue emptied the caption just as it was finally becoming
+        # readable. It is cleared by reply_done(), when the audio has
+        # actually drained.
     except asyncio.CancelledError:
         try:
             await brain.interrupt()
@@ -671,7 +688,7 @@ async def amain():
     mode = ("hands-free listening (the talk key still works)"
             if _MIC["mode"] == "open"
             else f"push-to-talk ({CFG['ptt_key']})")
-    log(f"[backtalk] up — agent={NAME} dir={CFG['agent_dir']} "
+    log(f"[backtalk] up - agent={NAME} dir={CFG['agent_dir']} "
         f"model={brain.model} mic={mode} "
         f"(say 'goodbye {NAME.lower()}' to hang up)")
     mouth.say(CFG["greeting"])
@@ -681,7 +698,8 @@ async def amain():
     # the brain's prompt-cache toll both hide behind the spoken line.
     loop.run_in_executor(None, warm_ears)
     # THE BRAIN CONNECT, guarded. This is the one startup step that
-    # needs a signed-in Claude Code, internet, and available usage.
+    # needs a working opencode install, a configured provider, the
+    # internet, and available quota.
     # When it fails or hangs, the mouth still works, so SAY SO instead
     # of dying silently with the face stuck on idle (a real field
     # case: the greeting played, then nothing, and on Windows the
@@ -700,10 +718,10 @@ async def amain():
                 else f"failed: {e!r}"[:220])
         log(f"[backtalk] BRAIN CONNECT {kind}")
         mouth.say("Bad news. The voice and the face are fine, but I "
-                  "couldn't reach my brain, the Claude Code session. "
+                  "couldn't reach my brain, the opencode session. "
                   "Check this window for the error. The usual causes: "
-                  "Claude Code isn't signed in, the internet is down, "
-                  "or the plan is out of usage.")
+                  "opencode isn't on the path, no provider is signed in, "
+                  "the internet is down, or the provider is out of quota.")
         mouth.wait_done(timeout=30)
         raise SystemExit(1)
     log("[backtalk] brain warm")
@@ -862,6 +880,13 @@ async def amain():
         told apart from speech that began before the ask even existed."""
         nonlocal speak_task
         log(f"[you]    {text}")
+        # Whatever language they just spoke in becomes this turn's language:
+        # the model is told to answer in kind, and the mouth is told which
+        # voice to read that answer with. Typed input has no detected
+        # language, so it falls through to sniffing the answer's text.
+        spoken = None if _TYPED else ears.last_language()
+        mouth.set_turn_language(spoken)
+        signals.language(spoken)
         # A pending spoken permission ask owns the next utterance IF
         # that utterance started after the ask was posed. Speech that
         # began earlier is the user interrupting the turn, not
@@ -978,8 +1003,10 @@ async def amain():
                 waiters.add(mic_fut)
             done, _ = await asyncio.wait(
                 waiters, return_when=asyncio.FIRST_COMPLETED)
+            _TYPED = False
             if typed_fut in done:
                 text = typed_fut.result(); typed_fut = None
+                _TYPED = True
                 if text and not await handle(text):
                     return
                 continue

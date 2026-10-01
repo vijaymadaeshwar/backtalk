@@ -1,4 +1,4 @@
-# backtalk: talk to your Claude Code agent out loud.
+# backtalk: talk to your opencode agent out loud.
 # Copyright (C) 2026 Jared Rhodenizer
 #
 # This program is free software: you can redistribute it and/or modify
@@ -130,6 +130,19 @@ def direction(items):
         pass
 
 
+_LANG_FILE = os.path.join(_DIR, ".voice_language")
+
+
+def language(code: str | None):
+    """The language the current turn is being held in, so a face can show
+    which tongue Jarvis picked. None when it could not be told apart."""
+    try:
+        with open(_LANG_FILE, "w") as f:
+            json.dump({"ts": time.time(), "language": code or None}, f)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
 def reply_done():
     """One reply has finished speaking and its audio has fully drained.
 
@@ -215,5 +228,31 @@ def static_stop():
         _static_proc = None
     try:
         os.remove(_LOADING_PID_FILE)
+    except OSError:
+        pass
+
+
+_CAPTION_FILE = os.path.join(_DIR, ".voice_caption")
+
+
+def caption(text: str):
+    """The words Jarvis is speaking right now, published as they stream.
+
+    The face already knows it is thinking or speaking; this is the
+    sentence itself, so a display can caption the reply as it happens
+    instead of showing only an expression. Written per sentence, so a
+    reader polling the bus sees the reply build up. Never raises.
+    """
+    try:
+        with open(_CAPTION_FILE, "w") as f:
+            f.write(json.dumps({"ts": time.time(), "text": text or ""}))
+    except OSError:
+        pass
+
+
+def caption_clear():
+    """Drop the caption once the reply is over."""
+    try:
+        os.remove(_CAPTION_FILE)
     except OSError:
         pass
