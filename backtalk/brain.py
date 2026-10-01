@@ -484,6 +484,7 @@ class WarmBrain:
         # is spoken: a reasoning model that narrates its plan aloud would
         # otherwise have the mouth reading its own scratchpad.
         kinds: dict[str, str] = {}
+        spoken = 0
         turn_limit = float(CFG.get("turn_timeout") or 150)
         while True:
             ev = await srv.next_event(timeout=turn_limit)
@@ -497,6 +498,7 @@ class WarmBrain:
                     pass
                 yield ("I did not get an answer back in time. "
                        "Ask me again and I will try once more.")
+                spoken += 1
                 return
             kind = ev.get("type")
             props = ev.get("properties") or {}
@@ -517,6 +519,7 @@ class WarmBrain:
                     sentence, buf = buf[:m.end()].strip(), buf[m.end():]
                     if sentence:
                         yield sentence
+                        spoken += 1
 
             elif kind == "message.part.updated":
                 if props.get("sessionID") != sid:
@@ -536,6 +539,7 @@ class WarmBrain:
                     kinds = {}
                     if tail:
                         yield tail
+                        spoken += 1
 
             elif kind == "permission.asked":
                 if props.get("sessionID") != sid:
@@ -556,12 +560,26 @@ class WarmBrain:
                 tail = buf.strip()
                 if tail:
                     yield tail
+                    spoken += 1
                 yield "That did not work on my side. Ask me again."
                 return
 
         tail = buf.strip()
         if tail:
             yield tail
+            spoken += 1
+
+        # A turn can end with nothing to say: the session goes idle (or the
+        # provider drops the stream) before a single text delta arrives.
+        # Staying quiet is the worst possible answer -- you cannot tell an
+        # empty reply from a broken microphone, so you just wait forever.
+        # Say something, and write down why, so the log explains the gap.
+        if not spoken:
+            log("[brain] turn produced no text at all -- the session went "
+                f"idle empty (session {str(sid)[:8]})")
+            yield ("I did not hear myself there -- that one came back "
+                   "empty. Ask me again.")
+            self._dirty = False
 
         await self._collect_usage()
         self._remember_session()

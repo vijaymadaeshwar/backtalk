@@ -20,6 +20,15 @@ import urllib.request
 sys.path.insert(0, r"C:\Users\Vijay\my-agent\backtalk")
 import numpy as np                                    # noqa: E402
 from backtalk import brain, ears, main, mouth, signals  # noqa: E402
+from backtalk.config import CFG                        # noqa: E402
+
+# Importing backtalk.config already read backtalk.json into CFG. Pin the
+# model here, in memory, rather than by editing the file: the live voice
+# reads that same file, and rewriting it mid-test leaves you with a
+# half-restored config if the run is interrupted or crashes. small keeps
+# this affordable when a 1.4GB medium model is already resident.
+CFG["stt_model"] = "small"
+CFG["stt_model_if_cached"] = "small"
 
 FACE = "http://127.0.0.1:8790/state"
 failures = []
