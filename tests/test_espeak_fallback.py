@@ -6,9 +6,10 @@ and now are spoken in their own language. Each case is run twice - once
 with the turn language set, once without - because the fallback keys off the
 turn language and must not fire on an ordinary English turn.
 """
+from pathlib import Path
 import sys
 
-sys.path.insert(0, r"C:\Users\Vijay\my-agent\backtalk")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np                                   # noqa: E402
 from backtalk import mouth                          # noqa: E402
 

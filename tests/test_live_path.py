@@ -1,9 +1,10 @@
 """Drive backtalk's real ask_stream so the live-data injection is exercised."""
 import asyncio
+from pathlib import Path
 import sys
 import time
 
-sys.path.insert(0, r"C:\Users\Vijay\my-agent\backtalk")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backtalk.brain import WarmBrain  # noqa: E402
 
 

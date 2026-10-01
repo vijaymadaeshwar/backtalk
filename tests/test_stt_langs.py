@@ -12,11 +12,11 @@ person. It cannot tell us how noisy his room is, but it does tell us
 whether a Hindi or Japanese sentence survives the trip.
 """
 import os
-import subprocess
+from pathlib import Path
 import sys
 import tempfile
 
-sys.path.insert(0, r"C:\Users\Vijay\my-agent\backtalk")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np                                   # noqa: E402
 from backtalk import ears, mouth                     # noqa: E402
 from backtalk.config import CFG                      # noqa: E402
@@ -56,7 +56,6 @@ OUT = tempfile.mkdtemp()
 
 def speech_pcm(text, code):
     """Real speech in `code`, as int16 at 16kHz mono."""
-    voice = mouth.voice_for(code)
     chunks = []
     for _rate, pcm in mouth.synth_stream(text, timeout=90.0):
         a = (np.frombuffer(pcm, dtype=np.int16) if isinstance(pcm, (bytes, bytearray))

@@ -39,6 +39,7 @@ HARD-WON AUDIO LAW #2 — buffer ~0.75s of synthesized audio before a
 sentence starts playing, so a slower machine never underruns into
 slow-motion garble.
 """
+import io
 import os
 import queue
 import re
@@ -429,6 +430,8 @@ def _stream_espeak(text: str, lang: str | None):
         return
     fd, path = tempfile.mkstemp(suffix=".txt", prefix="bt-espeak-")
     try:
+        # os.fdopen is inside the try on purpose: if it itself raises, the
+        # raw descriptor from mkstemp would never be closed.
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
         try:
@@ -441,7 +444,6 @@ def _stream_espeak(text: str, lang: str | None):
             capture_output=True, timeout=60)
         if not proc.stdout:
             return
-        import io
         with _wave.open(io.BytesIO(proc.stdout), "rb") as w:
             if w.getnchannels() > 1:      # espeak can emit stereo; we play mono
                 pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)

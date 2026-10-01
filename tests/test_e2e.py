@@ -12,15 +12,15 @@ speak fails here instead of passing quietly. The face's view is read back
 over HTTP from the real server, not from a stub.
 """
 import os
-import subprocess
+from pathlib import Path
 import sys
 import time
 import urllib.request
 
-sys.path.insert(0, r"C:\Users\Vijay\my-agent\backtalk")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np                                    # noqa: E402
-from backtalk import brain, ears, main, mouth, signals  # noqa: E402
-from backtalk.config import CFG                        # noqa: E402
+from backtalk import brain, ears, mouth, signals     # noqa: E402
+from backtalk.config import CFG                       # noqa: E402
 
 # Importing backtalk.config already read backtalk.json into CFG. Pin the
 # model here, in memory, rather than by editing the file: the live voice
@@ -55,7 +55,7 @@ def one_turn(utterance, spoken_hint=None):
     print("\n  == %s  (heard as: %s)" % (spoken_hint or "?", utterance))
     signals.caption_clear()
     for f in (".voice_direction", ".voice_language"):
-        p = os.path.join(r"C:\Users\Vijay\my-agent\backtalk", f)
+        p = os.path.join(str(Path(__file__).resolve().parent.parent), f)
         if os.path.exists(p):
             os.remove(p)
 
@@ -102,7 +102,6 @@ def one_turn(utterance, spoken_hint=None):
     check("brain answered in reasonable time", took < 90, "%.1fs" % took)
 
     # 4. the mouth: real audio for the ACTUAL reply text
-    reply_lang = mouth.detect_language(reply, lang)
     seconds = 0.0
     try:
         pieces = []
