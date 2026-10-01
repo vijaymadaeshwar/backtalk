@@ -43,6 +43,7 @@ import os
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -253,6 +254,11 @@ def detect_language(text: str, hint: str | None = None) -> str:
         hint = str(hint).strip().lower()[:2]
         if hint in _voices():
             return hint
+        # No kokoro voice for it, but espeak-ng can still speak it natively,
+        # so the hint stands -- voice_for() maps it to an English voice and
+        # synth_stream routes around that.
+        if espeak_voice_for(hint):
+            return hint
     low = (text or "").lower()
     if not low.strip():
         return "en"
@@ -260,10 +266,28 @@ def detect_language(text: str, hint: str | None = None) -> str:
     # Kana is checked BEFORE Han on purpose: Japanese is written with Han
     # too, so a naive "any Han character means Chinese" test reads every
     # Japanese sentence as Chinese. Kana present at all settles it.
+    #
+    # The rest are scripts Kokoro has no voice for. They are detected so the
+    # mouth can reach for espeak-ng instead of reading them in an English
+    # accent -- but they are deliberately NOT trusted as a hint above,
+    # because "en" there means "espeak will handle it", not "the voice
+    # table has it".
     scripts = (
         (r"[\u3040-\u30ff]", "ja"),
         (r"[\u4e00-\u9fff]", "zh"),
         (r"[\u0900-\u097f]", "hi"),
+        (r"[\u0b80-\u0bff]", "ta"),
+        (r"[\uac00-\ud7af\u1100-\u11ff]", "ko"),
+        (r"[\u0600-\u06ff]", "ar"),
+        (r"[\u0400-\u04ff]", "ru"),
+        (r"[\u0e00-\u0e7f]", "th"),
+        (r"[\u0370-\u03ff]", "el"),
+        (r"[\u0590-\u05ff]", "he"),
+        (r"[\u0d00-\u0d7f]", "ml"),
+        (r"[\u0c00-\u0c7f]", "kn"),
+        (r"[\u0c80-\u0cff]", "gu"),
+        (r"[\u0a00-\u0a7f]", "pa"),
+        (r"[\u0980-\u09ff]", "bn"),
     )
     for pattern, code in scripts:
         if _re.search(pattern, text):
@@ -338,6 +362,89 @@ def voice_for(lang: str | None) -> str:
     if lang and lang in table:
         return table[lang]
     return table.get("en") or CFG.get("voice") or "bm_lewis"
+
+
+# --- espeak-ng fallback -------------------------------------------------
+# Kokoro ships 54 voices across 9 languages. Everything else -- Tamil,
+# Korean, Arabic, Russian, Thai -- had no voice at all and was read in a
+# British English accent, which is worse than useless for someone who can
+# read the script but cannot make sense of the spoken words.
+#
+# espeak-ng covers ~100 languages including every one of those. It sounds
+# robotic next to Kokoro, so it is a fallback, not an upgrade: Kokoro is
+# used whenever it has a voice for the language.
+_ESPEAK = shutil.which("espeak-ng") or next(
+    (p for p in (r"C:\Program Files\eSpeak NG\espeak-ng.exe",
+                 r"C:\Program Files (x86)\eSpeak NG\espeak-ng.exe",
+                 "/usr/bin/espeak-ng", "/opt/homebrew/bin/espeak-ng")
+     if os.path.exists(p)), None)
+
+# Whisper's two-letter codes, mapped to espeak-ng's voice names. They mostly
+# agree; these are the ones that do not, plus the non-Latin cases where
+# espeak-ng wants a base voice rather than a region (zh->cmn is Mandarin).
+_ESPEAK_VOICE = {
+    "zh": "cmn", "yue": "yue", "nb": "nn", "nn": "nn",
+    "he": "he", "iw": "he", "jv": "jv",
+}
+_espeak_rate = 22050
+
+
+def espeak_voice_for(lang: str | None) -> str | None:
+    """The espeak-ng voice for a language, or None if it cannot speak it."""
+    if not lang or not _ESPEAK:
+        return None
+    code = lang.lower().replace("_", "-").split("-")[0]
+    if len(code) == 3:            # whisper sometimes reports 'tam', 'hin'
+        return None               # let espeak guess from the full code instead
+    return _ESPEAK_VOICE.get(code, code)
+
+
+def _stream_espeak(text: str, lang: str | None):
+    """One sentence -> int16 PCM at espeak's rate, via a UTF-8 temp file.
+
+    Passing non-Latin text as a command-line argument or on stdin produces
+    SILENCE on Windows (measured: Tamil, Chinese, Japanese, Korean, Arabic,
+    Russian and Thai all came back with peak amplitude 0 and 0.35s of empty
+    audio; only German, being Latin-1, worked through argv). Writing the
+    sentence to a UTF-8 file and using -f is the one form that works for
+    every script -- hence the temp file rather than the obvious subprocess
+    call.
+    """
+    import wave as _wave
+    voice = espeak_voice_for(lang)
+    if not (voice and text.strip()):
+        return
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="bt-espeak-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        try:
+            rate = float(CFG.get("speed") or 1.0)
+        except (TypeError, ValueError):
+            rate = 1.0
+        wpm = int(160 / max(rate, 0.5))
+        proc = subprocess.run(
+            [_ESPEAK, "-v", voice, "-s", str(wpm), "-f", path, "--stdout"],
+            capture_output=True, timeout=60)
+        if not proc.stdout:
+            return
+        import io
+        with _wave.open(io.BytesIO(proc.stdout), "rb") as w:
+            if w.getnchannels() > 1:      # espeak can emit stereo; we play mono
+                pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+                pcm = pcm.reshape(-1, w.getnchannels()).mean(axis=1).astype(np.int16)
+            else:
+                pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+            sr = w.getframerate()
+        if pcm.size:
+            global _espeak_rate
+            _espeak_rate = sr
+            yield pcm
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def warm(lang: str | None = None) -> str:
@@ -512,16 +619,34 @@ def _elevenlabs_ready() -> bool:
 
 def synth_stream(text: str, timeout: float = 30.0):
     """One sentence -> yields (sample_rate, pcm_chunk) as the TTS
-    renders. ElevenLabs when configured, Kokoro otherwise — and Kokoro
-    as the fallback on ANY ElevenLabs failure. Degrade, never mute."""
+    renders. ElevenLabs when configured, Kokoro otherwise - and Kokoro
+    as the fallback on ANY ElevenLabs failure. Degrade, never mute.
+
+    When the turn's language has no Kokoro voice at all, espeak-ng speaks
+    it in its own language rather than being read in an English accent.
+    """
+    lang = _turn_lang()
     if _elevenlabs_ready():
         try:
             for pcm in _stream_elevenlabs(text, timeout):
                 yield EL_RATE, pcm
             return
         except Exception as e:
-            log(f"[mouth] elevenlabs failed ({str(e)[:60]}) — "
+            log(f"[mouth] elevenlabs failed ({str(e)[:60]}) - "
                 f"falling back to {CFG['voice']}")
+
+    spoken = detect_language(text, lang)
+    if spoken and spoken not in _voices() and espeak_voice_for(spoken):
+        try:
+            chunks = list(_stream_espeak(text, spoken))
+            if chunks:
+                log(f"[mouth] {spoken} has no kokoro voice - espeak-ng "
+                    f"({espeak_voice_for(spoken)}) instead of an english accent")
+                yield _espeak_rate, chunks[0]
+                return
+        except Exception as e:
+            log(f"[mouth] espeak-ng failed ({str(e)[:60]}) - using kokoro")
+
     for pcm in _stream_kokoro(text):
         yield KOKORO_RATE, pcm
 

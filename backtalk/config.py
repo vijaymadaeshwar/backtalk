@@ -150,7 +150,12 @@ DEFAULTS = {
     # Whisper's own language codes; the value is a Kokoro voice name whose
     # first letter IS the pipeline to load. 54 voices across 9 languages
     # ship with the model, so add a key here any time you want another
-    # accent. Remove a key and that language simply falls back to English.
+    # accent.
+    #
+    # A language NOT in this table is not silently read in an English accent:
+    # espeak-ng covers ~100 languages (Tamil, Korean, Arabic, Russian, Thai,
+    # German...) and speaks them in their own language. Kokoro still wins
+    # wherever it has a voice, since it sounds far better.
     "voices": {
         "en": "bm_lewis",    # British, the butler register
         "es": "em_alex",     # Spanish
@@ -160,7 +165,9 @@ DEFAULTS = {
         "ja": "jm_kumo",     # Japanese
         "pt": "pm_alex",     # Portuguese
         "zh": "zf_xiaoxiao", # Mandarin
-        "de": "bm_lewis",    # no German voice ships: speaks it, reads as English
+        "de": "bm_lewis",    # no kokoro German voice; espeak-ng speaks it natively
+                             # instead (see mouth.synth_stream), so this is only
+                             # reached if espeak-ng is not installed.
     },
     # Speech recognition (faster-whisper, local, free).
     # NOTE: the plain multilingual models, not the ".en" ones. The ".en"
