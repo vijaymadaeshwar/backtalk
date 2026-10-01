@@ -19,6 +19,15 @@ import tempfile
 sys.path.insert(0, r"C:\Users\Vijay\my-agent\backtalk")
 import numpy as np                                   # noqa: E402
 from backtalk import ears, mouth                     # noqa: E402
+from backtalk.config import CFG                      # noqa: E402
+
+# Pin the model in memory before anything loads it. The committed config
+# upgrades to the cached `medium` model, which is 1.4GB; combined with the
+# Kokoro pipeline this test synthesises eight times over, that overruns
+# available RAM and dies in mkl_malloc. `small` is multilingual too -- this
+# test is about which language comes out, not transcription quality.
+CFG["stt_model"] = "small"
+CFG["stt_model_if_cached"] = "small"
 
 SR = 16000          # what the ear wants
 KOKORO_SR = 24000   # what Kokoro produces
@@ -79,12 +88,29 @@ print("NON-ENGLISH STT ACCURACY, on real synthesised speech")
 print("  model: %s" % ears._resolve_stt_model())
 print("=" * 74)
 
-rows, bad = [], []
+rows, bad, skipped = [], [], []
 for code, sentence, needle in CASES:
+    # Each language spins up its own Kokoro pipeline and mouth._pipes keeps
+    # them all alive, so eight languages accumulate. The live voice only ever
+    # holds one, so this is a property of the test -- drop each pipeline and
+    # prune ctranslate2's allocator between cases so the run fits in RAM.
+    try:
+        for _p in list(getattr(mouth, "_pipes", {}).values()):
+            del _p
+        mouth._pipes.clear()
+        mouth._pipe = None
+        import gc
+        gc.collect()
+        from ctranslate2 import set_cpu_allocator_options  # noqa
+        set_cpu_allocator_options("arena=0")  # release arena cache
+        set_cpu_allocator_options("")          # back to defaults
+    except Exception:
+        pass
     try:
         pcm = speech_pcm(sentence, code)
     except Exception as e:
         print("  %-3s SKIP  could not synthesise: %s" % (code, e))
+        skipped.append(code)
         continue
     if pcm is None or pcm.size < SR // 4:
         print("  %-3s FAIL  no audio produced" % code)
@@ -114,12 +140,29 @@ for code, sentence, needle in CASES:
     rows.append((code, detected, lang_ok, word_ok))
 
 print()
+total = len(CASES)
+print("languages run      : %d/%d" % (len(rows), total))
 print("sentence survived  : %d/%d  <- what matters" % (
-    sum(1 for r in rows if r[3]), len(rows)))
+    sum(1 for r in rows if r[3]), total))
 print("language identified: %d/%d  <- picks the accent" % (
-    sum(1 for r in rows if r[2]), len(rows)))
+    sum(1 for r in rows if r[2]), total))
 mislabelled = [r[0] for r in rows if not r[2] and r[3]]
 if mislabelled:
     print("  (words correct but accent may differ: %s)" % mislabelled)
+if skipped:
+    # A skipped language used to vanish from the denominator entirely, so
+    # losing seven of eight to an out-of-memory still printed "STT OK" on a
+    # single pass. Skips are unproven, not passes -- say so loudly.
+    print()
+    print("NOT TESTED (could not synthesise, usually RAM pressure): %s"
+          % ", ".join(skipped))
+    print("Close the live stack and re-run: a 1.4GB Whisper model plus this")
+    print("test's own Kokoro does not fit alongside Photoshop at times.")
 print()
-print("STT OK" if not bad else "PROBLEM LANGUAGES: %s" % bad)
+if bad:
+    print("STT PROBLEM LANGUAGES: %s" % bad)
+elif skipped:
+    print("STT INCOMPLETE -- %d language(s) never ran, so this is not a pass"
+          % len(skipped))
+else:
+    print("STT OK")
