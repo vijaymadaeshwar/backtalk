@@ -171,7 +171,7 @@ DEFAULTS = {
     },
     # Speech recognition (faster-whisper, local, free).
     # NOTE: the plain multilingual models, not the ".en" ones. The ".en"
-    # variants are English-only, which is what used to make Jarvis
+    # variants are English-only, which is what used to make Seyon
     # mishear every other language as English and answer in English.
     # tiny / base / small / medium — small is the accuracy/speed sweet
     # spot on a normal machine, and it auto-detects the language.
@@ -198,7 +198,7 @@ DEFAULTS = {
     # prompt tells whisper the speaker is English. So it only ever helped the
     # language it was written in, which is exactly the language that did not
     # need it. If you add one, expect the same trade.
-    "stt_prompt": "Vijay Jarvis open Notepad YouTube. Hola abre el bloc de notas. Bonjour ouvre le bloc notes. नमस्ते नोटपैड खोलें. こんにちは メモ帳を開いて。 记事本 打开。你好。",
+    "stt_prompt": "Vijay Seyon open Notepad YouTube. Hola abre el bloc de notas. Bonjour ouvre le bloc notes. नमस्ते नोटपैड खोलें. こんにちは メモ帳を開いて。 记事本 打开。你好。",
     # "auto" uses CUDA when present, otherwise CPU. int8 keeps CPU fast.
     "stt_device": "auto",
     "stt_compute": "int8",
