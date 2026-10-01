@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 
 from backtalk import live, signals
-from backtalk.config import CFG, DISCIPLINE
+from backtalk.config import CFG, DISCIPLINE, refresh_clock
 from backtalk.vlog import log
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s")
@@ -256,8 +256,14 @@ class WarmBrain:
     def _system(self) -> str:
         """The spoken-delivery discipline. opencode has no 'preset system
         prompt' concept, so it goes in as an explicit system string on
-        every turn — the AGENTS.md in agent_dir is loaded on top of it."""
-        return DISCIPLINE
+        every turn — the AGENTS.md in agent_dir is loaded on top of it.
+
+        The clock is refreshed here, per turn, because DISCIPLINE bakes in
+        the time at import. A process left running past midnight otherwise
+        greets the next morning as yesterday, and the model's only stated
+        source of truth for the date is the one string it was given.
+        """
+        return refresh_clock(DISCIPLINE)
 
     # ---- lifecycle -----------------------------------------------------
     async def start(self):

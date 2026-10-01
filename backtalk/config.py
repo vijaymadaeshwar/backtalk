@@ -319,9 +319,27 @@ DISCIPLINE = DISCIPLINE + " " + (
     "producing broken sentences in it."
 )
 
+CLOCK = ("__CLOCK__", "%A, %d %B %Y at %H:%M")
+
+
+def refresh_clock(text: str = None) -> str:
+    """The discipline with the current date and time substituted in.
+
+    The timestamp used to be formatted at import, which meant a process left
+    running overnight kept telling the model it was still yesterday. It is
+    now resolved every turn (brain.WarmBrain._system), so a machine that
+    runs for days stays honest about what day it is. Kept as a replace
+    rather than a rebuild so any hand-added discipline text is preserved.
+    """
+    src = DISCIPLINE if text is None else text
+    if CLOCK[0] in src:
+        return src.replace(CLOCK[0], time.strftime(CLOCK[1]))
+    return src
+
+
 DISCIPLINE = DISCIPLINE + " " + (
     "LIVE INFORMATION, this is not optional. Right now it is "
-    + time.strftime("%A, %d %B %Y at %H:%M")
+    + CLOCK[0]
     + " local time, and that is the only source of truth for what day it "
     "is. Your training does not cover the present, so never answer a "
     "question about the present out of your own memory. The assistant "
