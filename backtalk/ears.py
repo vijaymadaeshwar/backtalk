@@ -48,6 +48,35 @@ MAX_UTTER_S = 30
 
 _NONSPEECH = re.compile(r"[\[(][^\])]*[\])]")
 
+
+def _wake_re(phrase: str) -> re.Pattern:
+    """A tolerant matcher for one wake phrase.
+
+    Whisper does not punctuate consistently ("Hey, Seyon!"), so allow any
+    run of spaces/punctuation between the words, and match on word
+    boundaries so "seyon" inside a longer word cannot trigger it."""
+    words = [re.escape(w) for w in phrase.lower().split()]
+    return re.compile(r"\b" + r"[\s,.\-!?]*".join(words) + r"\b",
+                      re.IGNORECASE)
+
+
+def is_wake(text: str, phrases) -> bool:
+    """True if `text` contains any wake phrase. Tolerates punctuation and
+    capitalisation; variants cover whisper's spellings of "Seyon"."""
+    return any(_wake_re(p).search(text or "") for p in phrases)
+
+
+def strip_wake(text: str, phrases) -> str:
+    """Remove the first wake phrase from `text`, preserving the rest as
+    spoken. So "Hey Seyon, what's the weather" leaves "what's the
+    weather" (casing intact) and a bare "hey seyon" leaves ""."""
+    for p in phrases:
+        m = _wake_re(p).search(text or "")
+        if m:
+            return (text[:m.start()] + " " + text[m.end():]).strip(" ,.!?")
+    return (text or "").strip()
+
+
 _model = None
 _model_lock = threading.Lock()
 _backend = None          # "mlx" once the GPU path loads, else "faster-whisper"
@@ -499,6 +528,22 @@ class Ears:
                             speech_run = speech_total = 0
                             continue
                         return transcribe(np.concatenate(frames))
+
+    def wait_for_wake(self, phrases, gate=None, abort=None) -> str | None:
+        """Block until an utterance contains a wake phrase; return it.
+
+        Reuses the same VAD endpointer as listen_once, so a wake-word
+        turn costs no more than a normal one. Returns None only when
+        `abort` fires; otherwise it keeps the mic open indefinitely,
+        which is the point of hands-free. The returned transcript may
+        carry the command in the same breath ("hey seyon, what's it
+        doing"), and the caller strips the phrase with strip_wake()."""
+        while True:
+            text = self.listen_once(gate=gate, abort=abort)
+            if text is None:
+                return None
+            if is_wake(text, phrases):
+                return text
 
 
 def last_language() -> str | None:

@@ -48,6 +48,12 @@ Flags:
   --barge-in   with --open-mic: keep listening WHILE speaking.
                HEADPHONES REQUIRED — with open speakers the mic hears
                the reply and the agent interrupts itself.
+  --wake-word  with --open-mic: ignore speech until a wake phrase
+               (config key wake_word_phrases, default "hey seyon") is
+               heard; say the command in the same breath or the next
+               one. "hey seyon, what's the weather" and "hey seyon"
+               then "what's the weather" both work. The talk key stays
+               direct. Costs one extra transcription pass per turn.
   --model X    override the model for this session (full id).
 
 Say "goodbye <name>" / "end voice mode" to hang up. Ctrl-C works.
@@ -65,7 +71,7 @@ from backtalk import signals
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
-                           warm as warm_ears)
+                           strip_wake, warm as warm_ears)
 from backtalk.journal import Journal, summarize as journal_summarize
 from backtalk.mouth import Mouth
 from backtalk.ptt import PTTListener
@@ -718,6 +724,15 @@ async def journal_flush(journal: Journal, brain: WarmBrain):
 async def amain():
     open_mic = "--open-mic" in sys.argv
     barge_in = "--barge-in" in sys.argv or CFG.get("barge_in")
+    wake_word = "--wake-word" in sys.argv or CFG.get("wake_word")
+    wake_phrases = [str(p).lower()
+                    for p in (CFG.get("wake_word_phrases") or [])]
+    if wake_word and not wake_phrases:
+        # wake word on but no phrases configured: fall back to a plain
+        # open mic rather than a listener that can never wake.
+        log("[backtalk] wake_word is on but wake_word_phrases is empty; "
+            "ignoring wake word")
+        wake_word = False
     model = None
     if "--model" in sys.argv:
         try:
@@ -751,6 +766,8 @@ async def amain():
     mode = ("hands-free listening (the talk key still works)"
             if _MIC["mode"] == "open"
             else f"push-to-talk ({CFG['ptt_key']})")
+    if wake_word and _MIC["mode"] == "open":
+        mode += f", wake word {wake_phrases[0]!r}"
     log(f"[backtalk] up - agent={NAME} dir={CFG['agent_dir']} "
         f"model={brain.model} mic={mode} "
         f"(say 'goodbye {NAME.lower()}' to hang up)")
@@ -1046,6 +1063,24 @@ async def amain():
         # without barge-in, while the mouth speaks.
         mic_gate = (lambda: _MIC["btn"]
                     or (not barge_in and mouth.speaking))
+
+        def capture_open(g):
+            """One open-mic turn. With wake_word on, ignore everything
+            until a wake phrase is heard; if the phrase carried the
+            command use it, otherwise listen once more for the command.
+            wake_word only applies in open mode; PTT is always direct."""
+            if not (wake_word and _MIC["mode"] == "open"):
+                return (g, ears.listen_once(
+                    gate=mic_gate, abort=lambda: _MIC["gen"] != g))
+            ab = lambda: _MIC["gen"] != g
+            woke = ears.wait_for_wake(wake_phrases, gate=mic_gate, abort=ab)
+            if woke is None:
+                return (g, None)
+            cmd = strip_wake(woke, wake_phrases)
+            if cmd:
+                return (g, cmd)          # "hey seyon, what's the weather"
+            return (g, ears.listen_once(gate=mic_gate, abort=ab))
+
         mic_fails = 0
         while True:
             if _MIC["gen"] != mic_gen_seen:
@@ -1065,9 +1100,7 @@ async def amain():
                 if mic_fut is None:
                     g = _MIC["gen"]
                     mic_fut = loop.run_in_executor(
-                        None, lambda g=g: (g, ears.listen_once(
-                            gate=mic_gate,
-                            abort=lambda: _MIC["gen"] != g)))
+                        None, lambda g=g: capture_open(g))
                 waiters.add(mic_fut)
             done, _ = await asyncio.wait(
                 waiters, return_when=asyncio.FIRST_COMPLETED)

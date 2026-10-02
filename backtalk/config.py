@@ -219,12 +219,16 @@ DEFAULTS = {
     # Barge-in: if true, listen while speaking (open mic) so a new
     # utterance interrupts the reply as soon as it is detected.
     "barge_in": False,
-    # Wake word: listen for "hey seyon" in open-mic mode to activate hands-
-    # free listening without pushing a key. May be CPU-heavy on slower machines.
+    # Wake word: in open-mic mode, wait for one of these phrases before
+    # treating what was said as a command. Say the phrase alone and the
+    # next utterance is the command; say it with the command in one breath
+    # ("hey seyon, what's the weather") and that counts too. Phrase
+    # variants catch the ways whisper spells "Seyon".
     "wake_word": False,
-    "wake_word_model": "small",
-    "wake_word_threshold": 0.7,
-    "wake_word_window_s": 1.5,
+    "wake_word_phrases": [
+        "hey seyon", "hey sayon", "hey sean", "hey saiyan",
+        "a seyon", "hey siyon",
+    ],
     # The microphone to record from, matched by NAME. "" means whatever
     # the OS calls the default input, which is right on most machines.
     #
