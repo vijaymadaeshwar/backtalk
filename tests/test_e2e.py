@@ -10,6 +10,12 @@ The audio is REAL: it is synthesised, streamed through the same
 synth_stream the mouth uses, and counted, so a language that fails to
 speak fails here instead of passing quietly. The face's view is read back
 over HTTP from the real server, not from a stub.
+
+ENVIRONMENT NOTE: backtalk shares the same opencode server as a running
+voice session. If another backtalk.main is live, this test competes for
+that server and latencies can spike. That is contention, not a code bug.
+Run this test alone, or with the live voice stack stopped, to avoid false
+positives on the "brain answered in reasonable time" check.
 """
 import os
 from pathlib import Path
