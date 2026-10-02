@@ -9,7 +9,6 @@ logs/
 # conversation -- noisy forever, and enough to make an update script believe
 # they had local edits. An enumerated list goes stale the day the code grows.
 .voice_*
-uv.lock
 backtalk.egg-info/
 # your personal config, created at setup: never tracked, never touched by updates
 backtalk.json
