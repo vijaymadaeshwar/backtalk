@@ -87,6 +87,20 @@ DEFAULTS = {
     # Extra folders the agent may access beyond agent_dir (e.g. your
     # notes vault). Absolute paths or ~ paths.
     "extra_dirs": [],
+    # Where a finished voice session writes itself down: one markdown file
+    # per session, named by timestamp. Empty means OFF, and empty is the
+    # default because this writes outside backtalk's own folder and that
+    # should be a decision rather than a surprise. Point it at your vault's
+    # daily-notes folder and every hangup leaves a record behind.
+    #
+    # backtalk writes the transcript and, if journal_summary is on, a plain
+    # summary from the brain. It does not decide what is worth remembering:
+    # that judgement belongs to the agent whose AGENTS.md this points at.
+    "journal_dir": "",
+    # Whether to spend one model call at hangup on a summary. Worth it on a
+    # real session, wasted on a two-line one, and always bounded -- if the
+    # brain is slow the entry is still written, just with less in it.
+    "journal_summary": True,
     # The opencode HTTP server backtalk talks to. It starts its own on
     # this port if nothing is listening, and REUSES a running server if
     # something already is — so starting opencode yourself first is fine
@@ -382,6 +396,8 @@ def load() -> dict:
     cfg["extra_dirs"] = [_expand(d) for d in cfg.get("extra_dirs", [])]
     cfg["signals_dir"] = _expand(cfg.get("signals_dir", "")) or str(REPO)
     cfg["barehands_state_dir"] = _expand(cfg.get("barehands_state_dir", ""))
+    # Empty stays empty: that is how journaling is switched off.
+    cfg["journal_dir"] = _expand(cfg.get("journal_dir", ""))
     thinking = _expand(cfg.get("thinking_sound", ""))
     if thinking and not os.path.isabs(thinking):
         thinking = str(REPO / thinking)

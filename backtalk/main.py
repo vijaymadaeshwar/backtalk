@@ -66,6 +66,7 @@ from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
                            warm as warm_ears)
+from backtalk.journal import Journal, summarize as journal_summarize
 from backtalk.mouth import Mouth
 from backtalk.ptt import PTTListener
 from backtalk.vlog import log
@@ -576,10 +577,15 @@ def _typed_reader(q: "queue.Queue[str]"):
                 sys.stdout.flush()
 
 
-async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
+async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str,
+                      on_reply=None):
     """First sentence ships alone (fast start); the rest go in
     2-sentence breaths — fuller chunks get livelier prosody (single
-    short sentences come out flat)."""
+    short sentences come out flat).
+
+    on_reply, if given, is called with each sentence as it is actually
+    spoken. That is what the journal records: the spoken words, in the
+    order the ears got them, not the model's raw stream."""
     t0 = time.time()
     first = True
     batch: list[str] = []
@@ -603,6 +609,15 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
         if not s:
             return
         if first:
+            if on_reply is not None:
+                # Recorded where the words are actually queued, so an
+                # interrupted reply still leaves behind the part the user
+                # really heard -- and once per audible chunk, never per
+                # sentence, or a 2-sentence breath appears twice.
+                try:
+                    on_reply(s)
+                except Exception:
+                    pass
             log(f"[{NAME}] ({time.time()-t0:.1f}s to first) {s}"
                 + (f"  <directions: {pending}>" if pending else ""))
             mouth.say_chunk(s, pending)
@@ -614,6 +629,11 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
             batch.append(s)
             if len(batch) >= 2:
                 spoken = " ".join(batch)
+                if on_reply is not None:
+                    try:
+                        on_reply(spoken)
+                    except Exception:
+                        pass
                 mouth.say_chunk(spoken, pending)
                 # Caption what is going audible now, so a display shows the
                 # reply as it is spoken rather than after it finishes.
@@ -626,6 +646,11 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
             emit(sentence)
         if batch:
             tail = " ".join(batch)
+            if on_reply is not None:
+                try:
+                    on_reply(tail)
+                except Exception:
+                    pass
             mouth.say_chunk(tail, pending)
             pending = []
             batch = []
@@ -650,6 +675,44 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
         except Exception:
             pass
         raise
+
+
+async def journal_flush(journal: Journal, brain: WarmBrain):
+    """Write the session down, then get out of the way.
+
+    Two rules, both learned the hard way by everything else in this file:
+    a hangup must never hang, and a hangup must never crash. The summary is
+    asked for on its OWN brain session so it cannot pollute the
+    conversation it is summarising -- the real brain has this whole exchange
+    in it, and adding bookkeeping to it would be visible to the next turn.
+    """
+    if not journal.active or not journal.events:
+        return
+    try:
+        summary = ""
+        if CFG.get("journal_summary"):
+            # stop() on the scratch brain releases its session handle; it
+            # never touches the shared server, which the real brain still
+            # owns until a few lines below.
+            scratch = WarmBrain(model=None, can_use_tool=lambda *a, **k: None)
+            try:
+                await scratch.start()
+                summary = await journal_summarize(
+                    scratch.ask_stream, journal.transcript())
+            finally:
+                try:
+                    await scratch.stop()
+                except Exception:
+                    pass
+        path = journal.write(summary)
+        if path:
+            log(f"[journal] wrote {path.name}")
+        elif summary:
+            log("[journal] could not write the entry (see above)")
+    except Exception as e:
+        # Journalling is a courtesy to the future reader. It is never worth
+        # failing a hangup over.
+        log(f"[journal] skipped: {type(e).__name__}: {e}")
 
 
 async def amain():
@@ -681,6 +744,9 @@ async def amain():
     brain = WarmBrain(model=model,
                       can_use_tool=make_permission_gate(mouth),
                       resume_id=resume_id)
+    # Journaling is inert unless journal_dir is set, so this costs nothing
+    # for anyone who has not opted in.
+    journal = Journal(CFG.get("journal_dir") or None, agent_name=NAME)
 
     mode = ("hands-free listening (the talk key still works)"
             if _MIC["mode"] == "open"
@@ -955,7 +1021,12 @@ async def amain():
         # wait on a ResultMessage the CLI is withholding for an answer.
         _deny_pending()
         await brain.reset_turn()
-        speak_task = asyncio.create_task(speak_reply(brain, mouth, text))
+        # Only turns that actually reach the brain are recorded: a permission
+        # answer and a console command are machinery, not conversation, and a
+        # journal full of "/status" is a journal nobody reads.
+        journal.say_user(text)
+        speak_task = asyncio.create_task(
+            speak_reply(brain, mouth, text, on_reply=journal.say_agent))
         return True
 
     try:
@@ -1082,6 +1153,7 @@ async def amain():
         mouth.shutdown()  # restores the music on Ctrl-C / crash paths too
         signals.static_stop()
         signals.set_state("idle")
+        await journal_flush(journal, brain)
         await brain.stop()
         log("[backtalk] hung up")
 
