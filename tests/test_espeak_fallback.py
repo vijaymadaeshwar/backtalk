@@ -84,3 +84,7 @@ if rate != 24000:
     bad.append("no-turn-lang")
 
 print("\nESPEAK FALLBACK OK" if not bad else "FAILURES: %s" % bad)
+
+# Exit nonzero on failure, so a caller that checks the exit code rather than
+# the screen is not told a broken fallback passed.
+sys.exit(1 if bad else 0)

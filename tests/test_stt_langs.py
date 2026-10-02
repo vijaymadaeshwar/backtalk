@@ -165,3 +165,8 @@ elif skipped:
           % len(skipped))
 else:
     print("STT OK")
+
+# A mislabelled accent is a known model quirk, not a failure; a broken or
+# unproven language is. Exit nonzero so a caller reading the exit code cannot
+# be told a partial run was a pass.
+sys.exit(1 if (bad or skipped) else 0)

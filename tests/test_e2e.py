@@ -99,6 +99,12 @@ def one_turn(utterance, spoken_hint=None):
     reply = " ".join(reply_chunks).strip()
     print("    brain -> %r  (%.1fs)" % (reply[:70], took))
     check("brain answered with words", len(reply) > 3, repr(reply[:40]))
+    # Voice latency is user-facing, so this is a real assertion and not a
+    # formality: a reply that takes a minute and a half is unusable out loud.
+    # It needs this machine to itself. Run it straight after test_stt_langs or
+    # test_espeak_fallback -- those load their own Kokoro, and together with the
+    # live stack that is three models competing, which pushed the first call
+    # past 90s. Standalone it lands between 6 and 25s.
     check("brain answered in reasonable time", took < 90, "%.1fs" % took)
 
     # 4. the mouth: real audio for the ACTUAL reply text
@@ -157,3 +163,8 @@ for hint, utterance in [("English", "what is two plus two"),
 
 print("\n" + "=" * 66)
 print("E2E PASS" if not failures else "E2E FAILURES: %s" % failures)
+
+# Exit nonzero on failure. Without this the script printed FAILURES and still
+# exited 0, so a caller checking the exit code -- a script, CI, anything that
+# is not reading the screen -- was told the turn had passed.
+sys.exit(1 if failures else 0)
