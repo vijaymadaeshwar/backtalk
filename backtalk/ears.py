@@ -25,6 +25,7 @@ an utterance opens after ~120ms of sustained speech, closes after
 `silence_ms` of trailing quiet. A `gate` callable can suppress
 listening (so the open mic ignores the speakers unless barge-in is on).
 """
+import importlib
 import os
 import platform
 import re
@@ -67,8 +68,10 @@ def _apple_gpu_available() -> bool:
     faster-whisper, which already uses CUDA wherever it exists."""
     if sys.platform != "darwin" or platform.machine() != "arm64":
         return False
+    # Deliberately unused: this is an availability probe, and an ImportError
+    # is the answer. Kept as importlib so the intent is obvious.
     try:
-        import mlx_whisper                       # noqa: F401
+        importlib.import_module("mlx_whisper")
     except ImportError:
         return False
     return True
