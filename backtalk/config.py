@@ -216,6 +216,15 @@ DEFAULTS = {
     # "auto" uses CUDA when present, otherwise CPU. int8 keeps CPU fast.
     "stt_device": "auto",
     "stt_compute": "int8",
+    # Barge-in: if true, listen while speaking (open mic) so a new
+    # utterance interrupts the reply as soon as it is detected.
+    "barge_in": False,
+    # Wake word: listen for "hey seyon" in open-mic mode to activate hands-
+    # free listening without pushing a key. May be CPU-heavy on slower machines.
+    "wake_word": False,
+    "wake_word_model": "small",
+    "wake_word_threshold": 0.7,
+    "wake_word_window_s": 1.5,
     # The microphone to record from, matched by NAME. "" means whatever
     # the OS calls the default input, which is right on most machines.
     #

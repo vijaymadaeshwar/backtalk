@@ -717,7 +717,7 @@ async def journal_flush(journal: Journal, brain: WarmBrain):
 
 async def amain():
     open_mic = "--open-mic" in sys.argv
-    barge_in = "--barge-in" in sys.argv
+    barge_in = "--barge-in" in sys.argv or CFG.get("barge_in")
     model = None
     if "--model" in sys.argv:
         try:
