@@ -258,14 +258,21 @@ def detect_language(text: str, hint: str | None = None) -> str:
     rather than being read aloud in the wrong accent.
     """
     if hint:
-        hint = str(hint).strip().lower()[:2]
-        if hint in _voices():
-            return hint
-        # No kokoro voice for it, but espeak-ng can still speak it natively,
-        # so the hint stands -- voice_for() maps it to an English voice and
-        # synth_stream routes around that.
-        if espeak_voice_for(hint):
-            return hint
+        raw = str(hint).strip().lower()
+        # The code as given FIRST, then its two-letter stem. Whisper's
+        # codes are normally two letters, but it reports 'yue' (Cantonese)
+        # and 'haw' whole, and other backends report ISO 639-3 ('hin',
+        # 'tam'). Truncating first turned 'yue' into 'yu', which is no
+        # language at all, so the Cantonese reply was read aloud in an
+        # English accent.
+        for cand in (raw, raw[:2]):
+            if cand in _voices():
+                return cand
+            # No kokoro voice for it, but espeak-ng can still speak it
+            # natively, so the hint stands -- voice_for() maps it to an
+            # English voice and synth_stream routes around that.
+            if espeak_voice_for(cand):
+                return cand
     low = (text or "").lower()
     if not low.strip():
         return "en"
@@ -414,9 +421,16 @@ def espeak_voice_for(lang: str | None) -> str | None:
     if not lang or not _ESPEAK:
         return None
     code = lang.lower().replace("_", "-").split("-")[0]
+    # The table wins BEFORE the length check, including for three-letter
+    # codes: whisper reports 'yue' for Cantonese, espeak-ng speaks it as
+    # 'yue', and the mapping says so. The old length check ran first and
+    # rejected it, so that entry could never be reached -- Cantonese fell
+    # all the way back to a Kokoro English accent instead.
+    if code in _ESPEAK_VOICE:
+        return _ESPEAK_VOICE[code]
     if len(code) == 3:            # whisper sometimes reports 'tam', 'hin'
         return None               # let espeak guess from the full code instead
-    return _ESPEAK_VOICE.get(code, code)
+    return code
 
 
 def _stream_espeak(text: str, lang: str | None):
