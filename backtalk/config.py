@@ -212,7 +212,7 @@ DEFAULTS = {
     # prompt tells whisper the speaker is English. So it only ever helped the
     # language it was written in, which is exactly the language that did not
     # need it. If you add one, expect the same trade.
-    "stt_prompt": "Vijay Seyon open Notepad YouTube. Hola abre el bloc de notas. Bonjour ouvre le bloc notes. नमस्ते नोटपैड खोलें. こんにちは メモ帳を開いて。 记事本 打开。你好。",
+    "stt_prompt": "Vijay Seyon open Notepad YouTube. Hola abre el bloc de notas. Bonjour ouvre le bloc notes. Olá abra o bloco de notas. नमस्ते नोटपैड खोलें. こんにちは メモ帳を開いて。 记事本 打开。你好。",
     # "auto" uses CUDA when present, otherwise CPU. int8 keeps CPU fast.
     "stt_device": "auto",
     "stt_compute": "int8",

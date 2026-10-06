@@ -188,8 +188,14 @@ _MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # longer forms instead, and the shared word goes to Spanish, where it
     # is more common on its own.
     ("pt", ("bom dia", "boa noite", "esta bem", "tudo bem", "obrigado",
-            "vou abrir", "o arquivo", "como voce", "nao posso")),
-    ("es", ("hola", "buenos dias", "buenas", "por favor", "gracias",
+            "vou abrir", "o arquivo", "como voce", "nao posso",
+            "voce pode", "pode abrir")),
+    # No "por favor" here either: Portuguese says it word for word too, so
+    # it decides nothing -- and because markers run BEFORE the stopword
+    # score, leaving it in meant every Portuguese sentence ending in
+    # "por favor" was read as Spanish and spoken by a Spanish voice.
+    # Spanish is settled by "hola" and by words it owns outright.
+    ("es", ("hola", "buenos dias", "buenas", "gracias",
             "voy a abrir", "el archivo", "como estas", "muy bien")),
     ("fr", ("bonjour", "bonsoir", "s il vous plait", "merci",
             "je vais", "le fichier", "comment allez", "tres bien")),
