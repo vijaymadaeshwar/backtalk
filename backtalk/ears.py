@@ -1,4 +1,4 @@
-﻿# backtalk: talk to your opencode agent out loud.
+# backtalk: talk to your opencode agent out loud.
 # Copyright (C) 2026 Jared Rhodenizer
 #
 # This program is free software: you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The ears â€” mic capture with VAD endpointing, transcribed in-process
+"""The ears — mic capture with VAD endpointing, transcribed in-process
 by faster-whisper. Local, free, no server, no API key.
 
 record_held() is the hold-to-talk capture (the button is the VAD).
@@ -522,7 +522,7 @@ class Ears:
                        len(frames) * FRAME_MS / 1000 > MAX_UTTER_S:
                         if speech_total < 8:
                             # <240ms of actual speech: a noise blip, not
-                            # a sentence â€” keep listening
+                            # a sentence — keep listening
                             in_utterance = False
                             frames, ring = [], []
                             speech_run = speech_total = 0
@@ -553,7 +553,7 @@ def last_language() -> str | None:
 
 def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25) -> str | None:
     """Hold-to-talk capture: record raw audio while is_held() is True,
-    then transcribe. The button is the VAD â€” no endpointing. Returns
+    then transcribe. The button is the VAD — no endpointing. Returns
     None for taps shorter than min_s (accidental presses)."""
     frames: list[np.ndarray] = []
     with _open_mic() as stream:
@@ -571,7 +571,7 @@ def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25) -> str | None
 
 if __name__ == "__main__":
     import time
-    print("[ears] listening â€” say something...", flush=True)
+    print("[ears] listening — say something...", flush=True)
     ears = Ears()
     start = time.time()
     while time.time() - start < 30:
@@ -582,4 +582,4 @@ if __name__ == "__main__":
         if text is None:
             print("[ears] timed out with no speech", flush=True)
             break
-        print("[ears] (noise/empty â€” still listening)", flush=True)
+        print("[ears] (noise/empty — still listening)", flush=True)
