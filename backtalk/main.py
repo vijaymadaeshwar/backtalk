@@ -681,6 +681,39 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str,
         except Exception:
             pass
         raise
+    except Exception as e:
+        # ask_stream raises when the PROMPT itself cannot be sent; its
+        # other three failure modes (no answer, session error, empty
+        # reply) yield a spoken line instead, and this block is what
+        # makes the fourth behave like the rest. Without it the task
+        # dies holding the exception, nothing parks the bus -- no
+        # done-callback reads the task until the NEXT utterance -- and
+        # the listener is left in silence with the face still showing
+        # "thinking", which reads as a broken microphone rather than a
+        # brain that could not be reached.
+        log(f"[turn] reply failed: {type(e).__name__}: {e}")
+        if batch:
+            # Complete sentences already accumulated but not yet queued
+            # are still things the listener was about to hear.
+            tail = " ".join(batch)
+            if on_reply is not None:
+                try:
+                    on_reply(tail)
+                except Exception:
+                    pass
+            mouth.say_chunk(tail, pending)
+            signals.caption(tail)
+            pending = []
+            batch = []
+        if first:
+            # Nothing was ever queued, so nothing will ever dequeue and
+            # reset the bus: park it here, and answer out loud. Silence
+            # is the one reply that cannot explain itself.
+            signals.static_stop()
+            signals.set_state("idle")
+            signals.caption_clear()
+            mouth.say("I could not reach my side of that one. "
+                      "Ask me again and I will try once more.")
 
 
 async def journal_flush(journal: Journal, brain: WarmBrain):
