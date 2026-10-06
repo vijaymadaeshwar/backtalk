@@ -55,6 +55,11 @@ DEFAULTS = {
     # Full id ON PURPOSE, same reasoning as "model". The switch lasts one
     # session and is always spoken; this default never moves by itself.
     "deep_model": "nvidia/nvidia/nemotron-3-super-120b-a12b",
+    # Which opencode agent VARIANT the voice session starts on, if your
+    # agent defines any (a named preset selected with a variant field).
+    # Empty means the agent's own default. The voice console's variant
+    # verb flips it live, and that also saves.
+    "variant": "",
     # Tool permissions for the voice session. "ask" is the default ON
     # PURPOSE (safety is opt-out, never opt-in): when the agent wants a
     # gated tool (write a file, run a real command), it ASKS OUT LOUD
@@ -75,15 +80,6 @@ DEFAULTS = {
     # behaves as "ask" (a headless voice session could never render
     # the terminal prompt it promised).
     "permission_mode": "ask",
-    # Which of your agent's skills the voice session can SEE. null keeps the
-    # CLI's own default (all of them). [] hides every one. A list names the
-    # ones to allow.
-    #
-    # This matters on a shared screen. Skill DESCRIPTIONS live in the system
-    # prompt, so if yours name clients, employers or systems, they are one
-    # screen-share away from an audience. A context filter, not a sandbox:
-    # it decides what the session is TOLD about, not what it can reach.
-    "visible_skills": None,
     # Extra folders the agent may access beyond agent_dir (e.g. your
     # notes vault). Absolute paths or ~ paths.
     "extra_dirs": [],
@@ -216,6 +212,12 @@ DEFAULTS = {
     # "auto" uses CUDA when present, otherwise CPU. int8 keeps CPU fast.
     "stt_device": "auto",
     "stt_compute": "int8",
+    # Pin whisper to one language instead of letting it detect. Empty (the
+    # default) means detect, which is what you want unless a language keeps
+    # being mistaken for a neighbour ("pt" read as "es"). Set "en" only when
+    # you want English forced no matter what is said. Accepts the two-letter
+    # codes whisper uses.
+    "stt_language": "",
     # Barge-in: if true, listen while speaking (open mic) so a new
     # utterance interrupts the reply as soon as it is detected.
     "barge_in": False,
@@ -405,6 +407,16 @@ def load() -> dict:
     except ValueError as e:
         print(f"[config] backtalk.json is not valid JSON ({e}) — "
               f"using defaults", flush=True)
+    # A privacy option that silently does nothing is worse than having none,
+    # so visible_skills was removed rather than left looking like protection.
+    # It promised to keep skill DESCRIPTIONS out of the session's system
+    # prompt, and opencode exposes no per-session way to do that (only
+    # permission.skill, which gates CALLING a skill, not disclosing it).
+    # If backtalk.json still sets it, say so plainly instead of ignoring it.
+    if cfg.get("visible_skills") is not None:
+        print("[config] visible_skills is set in backtalk.json but is NOT "
+              "implemented: skill descriptions are still visible to the "
+              "session. Remove the key, it does nothing.", flush=True)
     cfg["agent_dir"] = _expand(cfg["agent_dir"])
     cfg["extra_dirs"] = [_expand(d) for d in cfg.get("extra_dirs", [])]
     cfg["signals_dir"] = _expand(cfg.get("signals_dir", "")) or str(REPO)
