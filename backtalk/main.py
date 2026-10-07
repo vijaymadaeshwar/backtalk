@@ -1260,6 +1260,25 @@ def _claim_single_instance() -> bool:
     return True
 
 
+def _take_the_bus():
+    """Take the signal bus over from whatever voice line came before.
+
+    Holding the instance lock is the proof that nothing else can be
+    speaking, so `idle` is the honest thing to write — and it repairs
+    the one death no handler inside the old process can cover: a voice
+    killed mid-speech by `taskkill /F` (the supervisor's stuck-turn
+    restart) never reaches its own `finally`, so the bus would go on
+    saying `speaking` about a process that is already gone, and a face
+    would show a speaker that is no longer there.
+
+    Registers the same park for our own exit, so the bus is never left
+    lying about us either — see signals.register_exit_park for what
+    that does and does not cover.
+    """
+    signals.register_exit_park()
+    signals.park()
+
+
 def main():
     if not _claim_single_instance():
         print("[backtalk] ANOTHER VOICE LINE IS ALREADY RUNNING on this "
@@ -1269,6 +1288,7 @@ def main():
               "broken. Use the window that is already open, or close it "
               "and start again.", flush=True)
         sys.exit(1)
+    _take_the_bus()
     try:
         asyncio.run(amain())
     except KeyboardInterrupt:

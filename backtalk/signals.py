@@ -36,6 +36,7 @@ its format (state/state as a bare word, state/wave.json normalized
 
 Every write is wrapped: the bus must never crash the voice line.
 """
+import atexit
 import json
 import os
 import subprocess
@@ -78,6 +79,34 @@ def set_state(name: str):
                 f.write(name)
         except OSError:
             pass
+
+
+def park():
+    """Leave the bus reading `idle`, with the thinking sound stopped.
+
+    The state that is true whenever nothing is running, so it is what a
+    departing voice line should leave behind. Never raises."""
+    set_state("idle")
+    static_stop()
+
+
+def register_exit_park():
+    """Park the bus when this process leaves, however it leaves.
+
+    A voice that dies mid-speech otherwise strands the bus at
+    `speaking`: the finally in amain() is what normally writes `idle`,
+    and a dying process that never reaches it leaves a face showing a
+    speaker that is long gone. atexit covers the deaths a Python
+    process can clean up after — an uncaught exception, sys.exit, a
+    crash that unwinds the interpreter.
+
+    It cannot cover `taskkill /F`, which is how the supervisor restarts
+    a wedged voice, and no handler inside the dying process ever could.
+    That case is answered from the other side instead: the successor
+    parks the bus the moment it claims the instance, because holding
+    that lock is proof that nothing else can be speaking.
+    """
+    atexit.register(park)
 
 
 def feed_waveform(pcm: np.ndarray):
