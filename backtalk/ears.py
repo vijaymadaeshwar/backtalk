@@ -544,6 +544,10 @@ class Ears:
                 return None
             if is_wake(text, phrases):
                 return text
+            # Tuning hook: every heard-but-not-wake utterance goes to the
+            # log, so a session can teach the phrase variants with real
+            # data instead of guesses.
+            log(f"[ears] heard {text!r} - no wake phrase match")
 
 
 def last_language() -> str | None:

@@ -57,12 +57,19 @@ def test_strip_preserves_command():
 
 def test_wait_for_wake_loop():
     print("\n--- wait_for_wake ignores speech until the phrase ---")
+    import backtalk.ears as ears_mod
+    logged = []
+    ears_mod.log = lambda msg: logged.append(msg)
     e = Ears()
     heard = ["what time is it", "no idea", "hey seyon"]
     e.listen_once = lambda gate=None, abort=None, timeout_s=None: (
         heard.pop(0) if heard else None)
     woke = e.wait_for_wake(PHRASES)
     check("returns the waking utterance", woke == "hey seyon")
+    check("near misses are logged for tuning",
+          any("what time is it" in m for m in logged) and
+          any("no idea" in m for m in logged),
+          logged)
 
     print("\n--- abort stops it ---")
     e2 = Ears()

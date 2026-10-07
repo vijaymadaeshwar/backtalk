@@ -775,8 +775,12 @@ async def amain():
 
     CFG_BOOT_MODE = CFG["permission_mode"]
     _AUTOAPPROVE["on"] = CFG_BOOT_MODE == "bypassPermissions"
+    # A wake word is only reachable in open mode; asking for one implies
+    # hands-free, or the setting would silently do nothing in the default
+    # PTT mode.
     _MIC["mode"] = "open" if (open_mic
-                              or CFG.get("mic_mode") == "open") else "ptt"
+                              or CFG.get("mic_mode") == "open"
+                              or wake_word) else "ptt"
     # resume_last_session: reattach to the saved conversation, if any
     resume_id = None
     if CFG.get("resume_last_session"):
