@@ -45,7 +45,9 @@ hand with a UTF-8 (no BOM) editor.
    purpose; `transcribe()` sets `condition_on_previous_text=False` and
    `no_speech_threshold=0.8`. A wake phrase or command smuggled into the
    prompt once made whisper invent that turn out of room noise and Seyon
-   executed it. Keep the prompt empty.
+   executed it. Keep the prompt empty. `stt_no_speech_prob` is a second
+   net: an open-mic transcript the model itself scores as mostly
+   non-speech is blanked (`ears.speech_is_confident`).
 
 4. **Wake is English/Latin only.** The virama-tolerant matcher and the
    Tamil wake forms are gone; wake phrases are matched with `\b` and
@@ -62,10 +64,12 @@ hand with a UTF-8 (no BOM) editor.
 7. **Clean UTF-8, always.** No BOM, no double-encoded text.
    `test_encoding.py` scans every text file and fails the build on both.
 
-8. **The hands-free loudness gate.** `ears.speech_is_audible` drops an
-   open-mic capture whose speech frames are below `stt_min_rms`. It is
-   hands-free only; hold-to-talk records exactly what the person chose to
-   record and is never gated.
+8. **The hands-free gates.** Open-mic captures are filtered twice before
+   a turn is possible: `ears.speech_is_audible` drops speech below
+   `stt_min_rms`, and `ears._min_speech_frames` drops runs shorter than
+   `stt_min_speech_ms` (a cough, not a phrase). Both are hands-free only;
+   hold-to-talk records exactly what the person chose to record and is
+   never gated.
 
 ## Build, run, gates
 

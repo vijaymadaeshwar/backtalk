@@ -75,7 +75,8 @@ def capture(script, silence_ms=60, abort_after=None):
     stream = FakeStream([f for _, f in script], abort_after=abort_after)
     ears._open_mic = lambda: stream
     calls = []
-    ears.transcribe = lambda pcm: (calls.append(len(pcm)) or "a sentence")
+    ears.transcribe = lambda pcm, gate_no_speech=False: (
+        calls.append(len(pcm)) or "a sentence")
     ears_mod = Ears(silence_ms=silence_ms)
     ears_mod.vad = FakeVad([s for s, _ in script])
     text = ears_mod.listen_once(
@@ -120,18 +121,47 @@ def test_drops_quiet_noise():
     check("whisper was never called", calls == [], calls)
 
 
+def test_no_speech_gate():
+    print("\n--- the model's own no-speech score ---")
+    check("clear speech is kept", ears.speech_is_confident(0.05))
+    check("a music-bed transcript is not",
+          not ears.speech_is_confident(0.75))
+    saved = CFG.get("stt_no_speech_prob")
+    CFG["stt_no_speech_prob"] = 0
+    check("0 disables it", ears.speech_is_confident(0.99))
+    CFG["stt_no_speech_prob"] = saved
+
+
+def test_duration_gate():
+    print("\n--- a blip shorter than a phrase is dropped ---")
+    short = [(True, frame(3000))] * 10 + [(False, frame(0))] * 2
+    text, calls = capture(short, abort_after=40)
+    check("a 300ms blip never reaches whisper",
+          text is None and calls == [], (text, calls))
+    long_ = [(True, frame(3000))] * 30 + [(False, frame(0))] * 2
+    text, calls = capture(long_)
+    check("a phrase-long utterance gets through",
+          text == "a sentence" and len(calls) == 1, (text, calls))
+
+
 print("=" * 66)
 print("OPEN-MIC ENDPOINTING")
 print("=" * 66)
 
 saved_mic, saved_transcribe = ears._open_mic, ears.transcribe
+saved_min = CFG.get("stt_min_speech_ms")
 try:
+    CFG["stt_min_speech_ms"] = 0     # old 240ms floor for the core tests
     test_loudness_gate()
     test_captures_a_sentence()
     test_ignores_a_leading_blip()
     test_drops_quiet_noise()
+    test_no_speech_gate()
+    CFG["stt_min_speech_ms"] = 600   # and the phrase-length floor on
+    test_duration_gate()
 finally:
     ears._open_mic, ears.transcribe = saved_mic, saved_transcribe
+    CFG["stt_min_speech_ms"] = saved_min
 
 print("\n" + "=" * 66)
 print("ENDPOINTING OK" if not FAILURES else "ENDPOINTING FAILURES: %s" % FAILURES)

@@ -209,6 +209,19 @@ DEFAULTS = {
     # the OPEN-MIC path is gated -- hold-to-talk records exactly what the
     # person chose to record. 0 turns the gate off.
     "stt_min_rms": 200,
+    # Minimum speech in a hands-free utterance before whisper sees it, in
+    # milliseconds. A cough, a door, or a one-word splash of noise that VAD
+    # calls speech is shorter than a real command; requiring a plausible
+    # phrase length drops those without touching hold-to-talk. 0 keeps the
+    # old 240ms floor.
+    "stt_min_speech_ms": 400,
+    # The model's own no_speech probability at or above which a transcript
+    # is treated as non-speech and blanked. Whisper sometimes prints
+    # confident text ("Thanks for watching!") over a music bed it
+    # nonetheless scores as mostly silence; this is the check that believes
+    # that score. OPEN-MIC only -- hold-to-talk records what you chose.
+    # 0 disables it.
+    "stt_no_speech_prob": 0.5,
     # Barge-in: if true, listen while speaking (open mic) so a new
     # utterance interrupts the reply as soon as it is detected.
     "barge_in": False,

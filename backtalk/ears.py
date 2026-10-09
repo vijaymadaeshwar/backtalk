@@ -93,6 +93,7 @@ def strip_wake(text: str, phrases) -> str:
 _model: Any = None
 _model_lock = threading.Lock()
 _backend = None          # "mlx" once the GPU path loads, else "faster-whisper"
+_LAST_NO_SPEECH = 0.0    # no_speech score of the last transcript, for logs
 
 
 def _apple_gpu_available() -> bool:
@@ -437,20 +438,26 @@ def warm():
     return _model
 
 
-def transcribe(pcm: np.ndarray) -> str:
+def transcribe(pcm: np.ndarray, gate_no_speech: bool = False) -> str:
     """int16 mono 16kHz -> text. Bracketed non-speech markers that
     whisper emits ([BLANK_AUDIO], [SIGHS], (coughs)...) are stripped;
     if whatever remains is silence."""
-    return transcribe_language(pcm)[0]
+    return transcribe_language(pcm, gate_no_speech)[0]
 
 
-def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
+def transcribe_language(pcm: np.ndarray,
+                        gate_no_speech: bool = False) -> tuple[str, str | None]:
     """transcribe(), plus the language whisper itself detected.
 
     The code is None only when a caller forces English. The detection is
     reported for logging and tests; it no longer picks a voice -- Seyon
     answers in English whatever the ear heard, so nothing upstream keys
     off this any more.
+
+    gate_no_speech is the hands-free path. With it, a clip the model
+    itself scores as mostly non-speech is blanked, so a music bed that
+    VAD passed is not handed on as an invented sentence. Hold-to-talk
+    leaves it off: it records exactly what the person chose to say.
     """
     model = warm()
     audio = pcm.astype(np.float32) / 32768.0
@@ -461,6 +468,7 @@ def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
     lang = forced if forced else ("en" if _stt().endswith(".en") else None)
     hint = (CFG.get("stt_prompt") or "").strip() or None
     detected = None
+    nsp = 0.0
     if _backend == "mlx":
         import mlx_whisper  # pyright: ignore[reportMissingImports]
         res = mlx_whisper.transcribe(audio, path_or_hf_repo=model,
@@ -469,6 +477,11 @@ def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
                                      verbose=None)
         text = res["text"].strip()
         detected = res.get("language")
+        for s in res.get("segments") or []:
+            v = s.get("no_speech_prob") if isinstance(s, dict) \
+                else getattr(s, "no_speech_prob", None)
+            if v is not None:
+                nsp = max(nsp, float(v))
     else:
         segments, info = model.transcribe(
             audio, temperature=0.0, language=lang, initial_prompt=hint,
@@ -478,9 +491,17 @@ def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
             # dropped outright -- the ambient-noise path that once
             # hallucinated a wake phrase + command.
             condition_on_previous_text=False, no_speech_threshold=0.8)
-        text = "".join(s.text for s in segments).strip()
+        segs = list(segments)
+        text = "".join(s.text for s in segs).strip()
         detected = getattr(info, "language", None)
-    return _NONSPEECH.sub("", text).strip(), detected or lang or None
+        for s in segs:
+            nsp = max(nsp, float(getattr(s, "no_speech_prob", 0.0) or 0.0))
+    global _LAST_NO_SPEECH
+    _LAST_NO_SPEECH = nsp
+    text = _NONSPEECH.sub("", text).strip()
+    if text and gate_no_speech and not speech_is_confident(nsp):
+        text = ""      # the model itself says this was never speech
+    return text, detected or lang or None
 
 
 def _rms(frame: np.ndarray) -> float:
@@ -501,6 +522,30 @@ def speech_is_audible(mean_speech_rms: float) -> bool:
     """
     floor = float(CFG.get("stt_min_rms", MIN_SPEECH_RMS) or 0)
     return floor <= 0 or mean_speech_rms >= floor
+
+
+def speech_is_confident(no_speech_prob: float) -> bool:
+    """False when the model itself judges a clip to be non-speech.
+
+    VAD and the loudness floor both pass a music bed; whisper then
+    sometimes prints confident text over it ("Thanks for watching!"). Its
+    own no_speech score is the honest tell, and this is the check that
+    believes it -- the score whisper's internal 0.8 filter lets through
+    because the text was confident. Hands-free only; 0 disables it.
+    """
+    cutoff = float(CFG.get("stt_no_speech_prob", 0.0) or 0.0)
+    return cutoff <= 0 or no_speech_prob < cutoff
+
+
+def _min_speech_frames() -> int:
+    """Hands-free minimum speech length before whisper, in VAD frames.
+
+    A real phrase is longer than a cough or a one-word splash of noise.
+    Config is in milliseconds; the old 240ms floor is the minimum so a
+    short deliberate command still works. 0 disables the duration floor.
+    """
+    ms = float(CFG.get("stt_min_speech_ms", 0) or 0)
+    return max(8, int(ms / FRAME_MS))
 
 
 class Ears:
@@ -563,12 +608,14 @@ class Ears:
                        len(frames) * FRAME_MS / 1000 > MAX_UTTER_S:
                         mean_rms = speech_rms_sum / speech_total \
                             if speech_total else 0.0
-                        if speech_total < 8 or not speech_is_audible(mean_rms):
-                            # Too little speech, or too quiet to be a
-                            # person: a noise blip, not a sentence. Keep
+                        min_frames = _min_speech_frames()
+                        if speech_total < min_frames or \
+                           not speech_is_audible(mean_rms):
+                            # Too short to be a phrase, or too quiet to be
+                            # a person: a noise blip, not a sentence. Keep
                             # listening rather than hand it to whisper,
                             # which would invent words over the hum.
-                            if speech_total >= 8:
+                            if speech_total >= min_frames:
                                 log(f"[ears] dropped a {mean_rms:.0f}-rms "
                                     f"blip as room noise")
                             in_utterance = False
@@ -576,7 +623,8 @@ class Ears:
                             speech_run = speech_total = 0
                             speech_rms_sum = 0.0
                             continue
-                        return transcribe(np.concatenate(frames))
+                        return transcribe(np.concatenate(frames),
+                                          gate_no_speech=True)
 
     def wait_for_wake(self, phrases, gate=None, abort=None) -> str | None:
         """Block until an utterance contains a wake phrase; return it.
@@ -593,10 +641,13 @@ class Ears:
                 return None
             if is_wake(text, phrases):
                 return text
+            if not text:
+                continue          # blanked as non-speech; nothing to report
             # Tuning hook: every heard-but-not-wake utterance goes to the
-            # log, so a session can teach the phrase variants with real
-            # data instead of guesses.
-            log(f"[ears] heard {text!r} - no wake phrase match")
+            # log, with the model's own no-speech score, so a session can
+            # teach the phrase variants with real data instead of guesses.
+            log(f"[ears] heard {text!r} - no wake phrase match "
+                f"(nsp={_LAST_NO_SPEECH:.2f})")
 
 
 def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25,

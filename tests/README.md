@@ -17,8 +17,9 @@ stack running (brain on 4599, face on 8790).
 | script | what it proves |
 | --- | --- |
 | `test_wake.py` | Wake phrases are recognised however whisper spells or punctuates them, stripped without damaging the command, and the shipped phrases are Latin-only. |
-| `test_endpointing.py` | The open-mic endpointer opens and closes on schedule, and the loudness gate drops quiet noise before whisper sees it. |
+| `test_endpointing.py` | The open-mic endpointer opens and closes on schedule, and the hands-free gates (loudness floor, minimum phrase length, and the model's own no-speech score) drop noise before whisper sees it. |
 | `test_ptt.py` | Hold-to-talk timing: the release callback fires before transcription, taps are ignored, the time cap still proceeds. |
+| `test_ptt_headless.py` | A machine with no keyboard backend (CI) still imports `backtalk.main`, and asking for a key listener fails cleanly instead of taking the line down. |
 | `test_encoding.py` | Every text file is clean UTF-8: no BOM, no double-encoding. |
 | `test_journal.py` | What the session journal writes, what it refuses to write, and what it does when the brain is slow or broken. |
 | `test_bus_park.py` | The bus is never left saying `speaking` by a voice that is gone. |
