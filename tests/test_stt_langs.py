@@ -1,15 +1,31 @@
-"""Non-English STT accuracy, on REAL speech.
+"""STT accuracy for the two languages the ear hears: English and Tamil.
 
 The end-to-end wiring test fed Whisper a noise-shaped signal, so it proved
 the plumbing and nothing about language handling. This one synthesises
-genuine speech in each language with the very voices Jarvis speaks with,
-resamples it to the 16kHz mono the ear expects, and asks Whisper what it
-heard.
+genuine speech with the very voices Seyon speaks with, resamples it to the
+16kHz mono the ear expects, and asks Whisper what it heard.
 
 That round trip is the one that matters: it is exactly what happens when
 Vijay holds the key and speaks, except the speaker is a model instead of a
-person. It cannot tell us how noisy his room is, but it does tell us
-whether a Hindi or Japanese sentence survives the trip.
+person.
+
+Only English and Tamil are here. The other languages this file used to
+cover -- Spanish, French, Hindi, Italian, Japanese, Portuguese, Mandarin --
+stopped being worth a two-minute test when the assistant went down to a
+two-language policy, and English-only replies did not change what the EAR
+is asked to do, so they stayed out.
+
+The two checks per language fail independently:
+  "lang"   - did whisper identify the language? (its own guess)
+  "heard"   - did the SENTENCE SURVIVE? (needle word present) - this is
+              what the brain actually receives, and the one that is scored.
+The language code is asserted only for English. For Tamil it is reported
+but not scored: this test's Tamil is espeak-ng's synthetic voice, and
+Whisper's language ID on that particular audio is a coin flip (it has been
+seen reporting Romanian and Arabic for unmistakably Tamil sentences) while
+still writing much of the sentence in Tamil script. Real human Tamil through
+the real microphone does detect as Tamil; a model cannot stand in for it
+here, so the sentence surviving is what this pins.
 """
 import os
 from pathlib import Path
@@ -23,53 +39,64 @@ from backtalk.config import CFG                      # noqa: E402
 
 # Pin the model in memory before anything loads it. The committed config
 # upgrades to the cached `medium` model, which is 1.4GB; combined with the
-# Kokoro pipeline this test synthesises eight times over, that overruns
-# available RAM and dies in mkl_malloc. `small` is multilingual too -- this
-# test is about which language comes out, not transcription quality.
+# Kokoro pipeline this test synthesises over, that overruns available RAM
+# and dies in mkl_malloc. `small` is multilingual too -- this test is about
+# the language coming out, not transcription quality.
 CFG["stt_model"] = "small"
 CFG["stt_model_if_cached"] = "small"
 
 SR = 16000          # what the ear wants
-KOKORO_SR = 24000   # what Kokoro produces
 
-# (code, sentence in that language, a distinctive word to look for)
-# The needle is the word in THAT language for "notepad" -- matching "notepad"
-# in Spanish would fail a perfect transcription, since the translation is
-# "bloc de notas".
-# Two checks per language, because they fail independently:
-#   "lang"  - did whisper identify the language? (its own guess)
-#   "heard"  - did the SENTENCE SURVIVE? (needle word present, no cross-
-#              language bleed) - this is what the brain actually receives.
+# (code, sentence, needle word, assert_language)
+# The needle is the word in THAT language: matching "notepad" in a Tamil
+# sentence would fail a perfect transcription, since the word is Notepad's
+# own name written in Tamil script.
 CASES = [
-    ("en", "Hello there, could you open Notepad for me please?", "notepad"),
-    ("es", "Hola, puedes abrir el Bloc de notas por favor?", "bloc"),
-    ("fr", "Bonjour, pouvez vous ouvrir le bloc notes svp?", "notes"),
-    ("hi", "नमस्ते, क्या आप नोटपैड खोल सकते हैं?", "नोटपैड"),
-    ("it", "Ciao, puoi aprire il Blocco Note per favore?", "note"),
-    ("ja", "こんにちは、メモ帳を開いてください。", "メモ帳"),
-    ("pt", "Ola, voce pode abrir o bloco de notas por favor?", "bloco"),
-    ("zh", "你好，请打开记事本。", "记事本"),
+    ("en", "Hello there, could you open Notepad for me please?",
+     "notepad", True),
+    # "vanakkam, please open notepad" -- rendered straight through
+    # espeak-ng's Tamil voice. The reply path is English-only now, so
+    # synth_stream would hand this sentence to the English Kokoro voice,
+    # which cannot say Tamil; this row is about the ear hearing Tamil,
+    # not about the mouth speaking it.
+    ("ta", "வணக்கம், நோட்பைட் ஐ திறக்கவும்.",
+     ("வணக்கம்", "vanakkam"), False),
 ]
 
 OUT = tempfile.mkdtemp()
 
 
-def speech_pcm(text, code):
-    """Real speech in `code`, as int16 at 16kHz mono."""
-    chunks = []
-    for _rate, pcm in mouth.synth_stream(text, timeout=90.0):
+def speech_pcm(text, code="en"):
+    """Real speech for `text`, as int16 at 16kHz mono.
+
+    English renders through the live reply path (synth_stream -> kokoro).
+    The Tamil row renders straight through espeak-ng's Tamil voice,
+    because the reply path speaks English only and would read Tamil
+    script with an English voice -- a reading Whisper could not match
+    against the needle no matter how well it transcribed.
+    """
+    chunks, rate = [], 0
+    if code == "ta":
+        stream = ((mouth._espeak_rate, p)
+                  for p in mouth._stream_espeak(text, "ta"))
+    else:
+        stream = mouth.synth_stream(text, timeout=90.0)
+    for r, pcm in stream:
         a = (np.frombuffer(pcm, dtype=np.int16) if isinstance(pcm, (bytes, bytearray))
              else np.asarray(pcm, dtype=np.int16))
         if a.size:
             chunks.append(a)
+            rate = rate or r
     if not chunks:
-        return None
+        return None, 0
+    # The rate is whichever pipeline actually answered: Kokoro is 24000,
+    # espeak-ng 22050. Assuming one for the other pitched the Tamil case
+    # wrong by 8%, which is enough to cost a transcription.
     wave = np.concatenate(chunks).astype(np.float32)
-    # Linear resample 24k -> 16k. Whisper's accuracy on short files is
-    # sensitive to this, so it is done explicitly rather than assumed.
-    n_out = int(len(wave) * SR / KOKORO_SR)
+    n_out = int(len(wave) * SR / rate)
     idx = np.linspace(0, len(wave) - 1, n_out)
-    return np.interp(idx, np.arange(len(wave)), wave).astype(np.int16)
+    pcm = np.interp(idx, np.arange(len(wave)), wave).astype(np.int16)
+    return pcm, rate
 
 
 def word_overlap(heard, needle):
@@ -79,20 +106,22 @@ def word_overlap(heard, needle):
         s = "".join(c for c in unicodedata.normalize("NFKD", s)
                     if not unicodedata.combining(c))
         return "".join(c for c in s.lower() if c.isalnum())
-    return fold(needle) in fold(heard)
+    needles = (needle,) if isinstance(needle, str) else needle
+    return any(fold(n) in fold(heard) for n in needles)
 
 
 print("=" * 74)
-print("NON-ENGLISH STT ACCURACY, on real synthesised speech")
+print("STT ACCURACY for heard languages (English, Tamil input), real speech")
 print("  model: %s" % ears._resolve_stt_model())
 print("=" * 74)
 
 rows, bad, skipped = [], [], []
-for code, sentence, needle in CASES:
-    # Each language spins up its own Kokoro pipeline and mouth._pipes keeps
-    # them all alive, so eight languages accumulate. The live voice only ever
-    # holds one, so this is a property of the test -- drop each pipeline and
-    # prune ctranslate2's allocator between cases so the run fits in RAM.
+for code, sentence, needle, assert_lang in CASES:
+    # Each language can spin up its own Kokoro pipeline and mouth._pipes
+    # keeps them alive, so pipelines accumulate. The live voice only ever
+    # holds one, so this is a property of the test -- drop each pipeline
+    # and prune ctranslate2's allocator between cases so the run fits in
+    # RAM.
     try:
         for _p in list(getattr(mouth, "_pipes", {}).values()):
             del _p
@@ -106,7 +135,7 @@ for code, sentence, needle in CASES:
     except Exception:
         pass
     try:
-        pcm = speech_pcm(sentence, code)
+        pcm, rate = speech_pcm(sentence, code)
     except Exception as e:
         print("  %-3s SKIP  could not synthesise: %s" % (code, e))
         skipped.append(code)
@@ -130,11 +159,14 @@ for code, sentence, needle in CASES:
     word_ok = word_overlap(heard, needle)
     # A misidentified language is only cosmetic IF the words still arrived
     # correctly -- it picks the accent, not the meaning. So the two are
-    # reported and scored separately rather than lumped into one verdict.
-    status = "ok  " if word_ok else "FAIL"
-    print("  %s %-3s det=%-4s word=%-6s %r" % (
-        status, code, detected, "found" if word_ok else "MISSED", heard[:50]))
-    if not word_ok:
+    # reported and scored separately rather than lumped into one verdict,
+    # and the language guess is only fatal where we trust it (English).
+    scored = word_ok and (lang_ok or not assert_lang)
+    status = "ok  " if scored else "FAIL"
+    print("  %s %-3s rate=%-6d det=%-4s word=%-6s %r" % (
+        status, code, rate, detected, "found" if word_ok else "MISSED",
+        heard[:50]))
+    if not scored:
         bad.append(code)
     rows.append((code, detected, lang_ok, word_ok))
 
@@ -150,8 +182,8 @@ if mislabelled:
     print("  (words correct but accent may differ: %s)" % mislabelled)
 if skipped:
     # A skipped language used to vanish from the denominator entirely, so
-    # losing seven of eight to an out-of-memory still printed "STT OK" on a
-    # single pass. Skips are unproven, not passes -- say so loudly.
+    # losing the run to an out-of-memory still printed "STT OK" on a single
+    # pass. Skips are unproven, not passes -- say so loudly.
     print()
     print("NOT TESTED (could not synthesise, usually RAM pressure): %s"
           % ", ".join(skipped))

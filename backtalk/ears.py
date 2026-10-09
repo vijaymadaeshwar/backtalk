@@ -31,6 +31,8 @@ import platform
 import re
 import sys
 import threading
+import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -49,14 +51,44 @@ MAX_UTTER_S = 30
 _NONSPEECH = re.compile(r"[\[(][^\])]*[\])]")
 
 
+_VIRAMA = "\u0bcd"  # Tamil pulli: whisper drops it, so the phrase must not need it
+
+# The edge class for wake matching: \w (letters, digits, underscore) plus
+# the whole Tamil block, because Tamil vowel signs and the virama are
+# MARKS -- str.isalnum() is false for them, so plain \w misses them.
+_EDGE = r"[\w\u0b80-\u0bff]"
+
+
+def _wake_word(word: str) -> str:
+    """Escape one wake word, letting every Tamil virama go missing.
+
+    Whisper wrote "சேயோன" for "சேயோன்" -- the same name with the final
+    pulli dropped -- so a literal pattern never matched what was actually
+    heard. Making each virama optional accepts both spellings while the
+    letter skeleton stays exact ("சேயன்" still does not match)."""
+    out = []
+    for ch in word:
+        if ch == _VIRAMA:
+            out.append(re.escape(_VIRAMA) + "?")
+        else:
+            out.append(re.escape(ch))
+    return "".join(out)
+
+
 def _wake_re(phrase: str) -> re.Pattern:
     """A tolerant matcher for one wake phrase.
 
     Whisper does not punctuate consistently ("Hey, Seyon!"), so allow any
-    run of spaces/punctuation between the words, and match on word
-    boundaries so "seyon" inside a longer word cannot trigger it."""
-    words = [re.escape(w) for w in phrase.lower().split()]
-    return re.compile(r"\b" + r"[\s,.\-!?]*".join(words) + r"\b",
+    run of spaces/punctuation between the words. The edges use explicit
+    character classes instead of \\b: a word ending in virama is followed
+    by a NON-word character, so \\b would refuse to match "சேயோன்," --
+    and the wider class still stops the name matching inside a longer
+    word, English or Tamil."""
+    words = [_wake_word(w)
+             for w in unicodedata.normalize("NFC", phrase).lower().split()]
+    return re.compile(r"(?<!%s)" % _EDGE
+                      + r"[\s,.\-!?]*".join(words)
+                      + r"(?!%s)" % _EDGE,
                       re.IGNORECASE)
 
 
@@ -67,13 +99,15 @@ def is_wake(text: str, phrases) -> bool:
 
 
 def strip_wake(text: str, phrases) -> str:
-    """Remove the first wake phrase from `text`, preserving the rest as
-    spoken. So "Hey Seyon, what's the weather" leaves "what's the
+    """Remove the first wake phrase from `text`, preserving what follows
+    as spoken. So "Hey Seyon, what's the weather" leaves "what's the
     weather" (casing intact) and a bare "hey seyon" leaves ""."""
     for p in phrases:
         m = _wake_re(p).search(text or "")
         if m:
-            return (text[:m.start()] + " " + text[m.end():]).strip(" ,.!?")
+            joined = text[:m.start()] + " " + text[m.end():]
+            # Collapse the hole the phrase leaves ("x seyon y" -> "x  y").
+            return re.sub(r"\s+", " ", joined).strip(" ,.!?")
     return (text or "").strip()
 
 
@@ -437,9 +471,10 @@ def transcribe(pcm: np.ndarray) -> str:
 def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
     """transcribe(), plus the language whisper itself detected.
 
-    The code is None only when a caller forces English. This is what makes
-    Jarvis reply in kind: the ear hands the detected language to the mouth
-    so a Spanish answer is spoken by a Spanish voice.
+    The code is None only when a caller forces English. The detection is
+    reported for logging and tests; it no longer picks a voice -- Seyon
+    answers in English whatever the ear heard, so nothing upstream keys
+    off this any more.
     """
     model = warm()
     audio = pcm.astype(np.float32) / 32768.0
@@ -459,8 +494,14 @@ def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
         text = res["text"].strip()
         detected = res.get("language")
     else:
-        segments, info = model.transcribe(audio, temperature=0.0,
-                                          language=lang, initial_prompt=hint)
+        segments, info = model.transcribe(
+            audio, temperature=0.0, language=lang, initial_prompt=hint,
+            # A single utterance must never be decoded "in context" of the
+            # previous one: that is what makes whisper repeat or invent
+            # text. And a segment it judges to be mostly non-speech is
+            # dropped outright -- the ambient-noise path that once
+            # hallucinated a wake phrase + command.
+            condition_on_previous_text=False, no_speech_threshold=0.8)
         text = "".join(s.text for s in segments).strip()
         detected = getattr(info, "language", None)
     global _last_lang
@@ -469,7 +510,11 @@ def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
 
 
 class Ears:
-    def __init__(self, aggressiveness: int = 2, silence_ms: int = 480):
+    def __init__(self, aggressiveness: int = 3, silence_ms: int = 480):
+        # 3 is the strictest level: it takes clearer speech to open the
+        # mic, which is what keeps a fan/AC/TV room from feeding whisper
+        # a near-silence stream to hallucinate over. Drop to 2 if a
+        # quiet or distant voice stops waking it.
         self.vad = webrtcvad.Vad(aggressiveness)
         self.silence_frames = silence_ms // FRAME_MS
 
@@ -555,7 +600,8 @@ def last_language() -> str | None:
     return _last_lang
 
 
-def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25) -> str | None:
+def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25,
+                on_release: Callable[[], None] | None = None) -> str | None:
     """Hold-to-talk capture: record raw audio while is_held() is True,
     then transcribe. The button is the VAD — no endpointing. Returns
     None for taps shorter than min_s (accidental presses)."""
@@ -564,6 +610,13 @@ def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25) -> str | None
         while is_held() and len(frames) * FRAME_MS / 1000 < max_s:
             block, _ = stream.read(FRAME_LEN)
             frames.append(block[:, 0].copy())
+        # Fires the instant the key comes up -- before the tail frames
+        # and the transcription, not after them. The person already
+        # thinks of themselves as done talking, so the UI moves on with
+        # them. Reaching the time cap fires it too: the turn proceeds
+        # either way, and leaving the UI waiting would be the wrong story.
+        if on_release is not None:
+            on_release()
         # a small tail so the last word isn't clipped at release
         for _ in range(6):
             block, _ = stream.read(FRAME_LEN)

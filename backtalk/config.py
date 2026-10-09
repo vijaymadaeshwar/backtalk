@@ -156,28 +156,14 @@ DEFAULTS = {
     "voice": "bm_lewis",
     # Per-language voices. "voice" above stays the English default.
     # The mouth reads the language your reply is written in and loads the
-    # matching voice, so a Spanish answer is spoken in Spanish. Keys are
-    # Whisper's own language codes; the value is a Kokoro voice name whose
-    # first letter IS the pipeline to load. 54 voices across 9 languages
-    # ship with the model, so add a key here any time you want another
-    # accent.
+    # matching voice. Keys are Whisper's own language codes; the value is
+    # a Kokoro voice name whose first letter IS the pipeline to load.
     #
-    # A language NOT in this table is not silently read in an English accent:
-    # espeak-ng covers ~100 languages (Tamil, Korean, Arabic, Russian, Thai,
-    # German...) and speaks them in their own language. Kokoro still wins
-    # wherever it has a voice, since it sounds far better.
+    # Seyon answers in English only, so this table has one entry:
+    # English -- and every other language is deliberately absent,
+    # because no other language may ever reach the speaker.
     "voices": {
         "en": "bm_lewis",    # British, the butler register
-        "es": "em_alex",     # Spanish
-        "fr": "ff_siwis",    # French
-        "hi": "hm_omega",    # Hindi
-        "it": "im_nicola",   # Italian
-        "ja": "jm_kumo",     # Japanese
-        "pt": "pm_alex",     # Portuguese
-        "zh": "zf_xiaoxiao", # Mandarin
-        "de": "bm_lewis",    # no kokoro German voice; espeak-ng speaks it natively
-                             # instead (see mouth.synth_stream), so this is only
-                             # reached if espeak-ng is not installed.
     },
     # Speech recognition (faster-whisper, local, free).
     # NOTE: the plain multilingual models, not the ".en" ones. The ".en"
@@ -197,18 +183,16 @@ DEFAULTS = {
     # stops streaming used to hold the turn for 600s, which reads as a
     # dead assistant; this gives up, resets the turn, and stays usable.
     "turn_timeout": 150,
-    # Words whisper should expect: names, tools, anything it would
-    # otherwise mangle ("Vijay" heard as "Brijai"). Empty = no bias.
-    #
-    # LEFT EMPTY ON PURPOSE in a multilingual setup, and this is not a
-    # shrug: an English prompt measured as making NO difference to English
-    # accuracy ("Notepad", "YouTube", "Vijay" and "Whisper" all came through
-    # either way) while wrecking other languages -- a Japanese sentence
-    # transcribed as "Hello, Memo, please open your intestines", because the
-    # prompt tells whisper the speaker is English. So it only ever helped the
-    # language it was written in, which is exactly the language that did not
-    # need it. If you add one, expect the same trade.
-    "stt_prompt": "Vijay Seyon open Notepad YouTube. Hola abre el bloc de notas. Bonjour ouvre le bloc notes. Olá abra o bloco de notas. नमस्ते नोटपैड खोलें. こんにちは メモ帳を開いて。 记事本 打开。你好。",
+    # Empty on purpose. Any initial_prompt seeds whisper: the previous
+    # "Vijay Seyon open Notepad YouTube." hallucinated a wake phrase +
+    # command out of room noise (Seyon opened YouTube with nobody
+    # speaking), and even the harmless "Vijay, Notepad, YouTube,
+    # Whisper." made it invent "Hi, I'm Vijay... welcome to my
+    # channel... YouTube" loops every few seconds in a quiet room. The
+    # English-only measurement showed the prompt changed nothing for
+    # real accuracy, so the bias is pure downside -- names survive
+    # without it ("Vijay" came through either way).
+    "stt_prompt": "",
     # "auto" uses CUDA when present, otherwise CPU. int8 keeps CPU fast.
     "stt_device": "auto",
     "stt_compute": "int8",
@@ -336,16 +320,14 @@ DISCIPLINE = (
 )
 
 DISCIPLINE = DISCIPLINE + " " + (
-    "LANGUAGE. Whatever language he speaks to you in, you answer in "
-    "that same language, in its ordinary written form, and nothing more. "
-    "Spanish in, Spanish out; Tamil in, Tamil out. A reply in a language "
-    "he did not use is a failure, even when the content is right. Never "
-    "announce that you are switching, never name the language, and never "
-    "ask which language he prefers: he already chose by speaking. Write "
-    "it for the ear in that language, which means short spoken "
-    "sentences, no lists, no markdown, and no spelling out letters. If "
-    "you are not confident in a language, answer in English rather than "
-    "producing broken sentences in it."
+    "LANGUAGE. You speak exactly one language: English. Whatever "
+    "language he writes or speaks to you in -- Tamil, Hindi, anything "
+    "-- answer in English, every time. A reply in any other language "
+    "is a failure, even when the content is right, and whatever "
+    "language he used does not change this. Never announce that you "
+    "are switching, never name the language, and never ask which "
+    "language he prefers. Write it for the ear: short spoken "
+    "sentences, no lists, no markdown, and no spelling out letters."
 )
 
 CLOCK = ("__CLOCK__", "%A, %d %B %Y at %H:%M")

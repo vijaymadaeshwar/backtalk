@@ -42,3 +42,30 @@ packages = ["backtalk"]
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.10",
+]
+
+# The lint gate. Deliberately error-level only -- syntax errors,
+# undefined names, `break` outside a loop, unused imports -- because
+# this codebase has its own voice and a style linter would fight it.
+# Run: uv run ruff check backtalk tests
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E9",     # syntax errors
+    "F401",   # unused import
+    "F63",    # assertion/tuple bugs
+    "F7",     # break/continue/yield outside loop, print debug leftovers
+    "F81",    # redefinition
+    "F82",    # undefined name in __all__
+    "F821",   # undefined name
+    "F822",   # undefined name in __all__
+    "F823",   # local variable referenced before assignment
+]
+

@@ -157,188 +157,13 @@ def _sweep_orphan_espeak_tempdirs():
         log(f"[mouth] swept {swept} orphaned espeak temp dir(s)")
 
 
-# Whisper's language code -> Kokoro voice, from CFG["voices"]. English is
-# the default for anything unmapped or undetectable.
-_LANG_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("zh", ("chinese", "mandarin", "cantonese", "putonghua")),
-    ("ja", ("japanese", "tokyo")),
-    ("hi", ("hindi", "devanagari")),
-    ("es", ("spanish", "castellano", "espanol")),
-    ("pt", ("portuguese", "portugues", "brazilian")),
-    ("fr", ("french", "francais")),
-    ("it", ("italian", "italiano")),
-    ("de", ("german", "deutsch")),
-)
-
-# Words so characteristic of one language that finding even one settles it.
-# Needed because romanised speech ("ni hao", "konnichiwa", "buongiorno") has
-# no accents and almost no overlap with the stopword lists, so the score
-# below would call those Portuguese or Hindi at random.
-_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("zh", ("ni hao", "hao ma", "zhen de", "zen me", "shi shen",
-            "qing zhu", "bu ke yi", "zai na", "zhe ge", "zhong guo")),
-    ("ja", ("konnichiwa", "genki", "arigato", "ohayou", "sayounara",
-            "kudasai", "imasu", "desu ka", "hajimemashite")),
-    ("hi", ("namaste", "kaise", "kaisa", "dhanyavad", "aap kaise",
-            "kya kar", "theek hai", "nahi hai", "main aap")),
-    ("it", ("buongiorno", "buonasera", "come stai", "per favore",
-            "non posso", "aprire il", "il file", "grazie")),
-    # No bare "ola" here: that word is spelled the same in Portuguese and
-    # Spanish, so it decides nothing. Portuguese is identified by its
-    # longer forms instead, and the shared word goes to Spanish, where it
-    # is more common on its own.
-    ("pt", ("bom dia", "boa noite", "esta bem", "tudo bem", "obrigado",
-            "vou abrir", "o arquivo", "como voce", "nao posso",
-            "voce pode", "pode abrir")),
-    # No "por favor" here either: Portuguese says it word for word too, so
-    # it decides nothing -- and because markers run BEFORE the stopword
-    # score, leaving it in meant every Portuguese sentence ending in
-    # "por favor" was read as Spanish and spoken by a Spanish voice.
-    # Spanish is settled by "hola" and by words it owns outright.
-    ("es", ("hola", "buenos dias", "buenas", "gracias",
-            "voy a abrir", "el archivo", "como estas", "muy bien")),
-    ("fr", ("bonjour", "bonsoir", "s il vous plait", "merci",
-            "je vais", "le fichier", "comment allez", "tres bien")),
-    ("de", ("guten tag", "guten morgen", "bitte", "danke", "ich werde",
-            "die datei", "wie geht", "sehr gut", "ich offne")),
-)
-
-# The most frequent words in each language. A spoken reply is built almost
-# entirely from these, so scoring them identifies the language even when the
-# text is written without accents or is only a few words long -- which is
-# exactly the case for a one line answer. This is a stopword count, not
-# real linguistics: it only has to pick between nine voices, and when it
-# genuinely cannot tell, English is the safe answer.
-_STOPWORDS: dict[str, frozenset] = {
-    "es": frozenset("""de la que el en y a los se del las un por con no una su
-        para es al lo como mas pero sus le ya o este si porque esta entre
-        cuando muy sin sobre tambien me hasta hay donde quien desde todo nos
-        durante ti han yo hay vez puede estan""".split()),
-    "fr": frozenset("""le de un etre et a il avoir ne je son que se qui ce dans
-        en du elle au pour que pas vous par sur faire plus dire me on mon il ne
-        nous comme mais ou si les leur tout bien ete etre a moi toi son tes
-        avec ce il qui nous vous ils cette est""".split()),
-    "de": frozenset("""der die und in den von zu das mit sich des auf fur ist im
-        dem nicht ein eine als auch es an werden aus er hat dass sie nach wird
-        bei einer um am sind noch wie einem uber einen so zum haben nur oder
-        aber vor zur bis mehr durch man sein wurde sei""".split()),
-    "it": frozenset("""di che e il la un per in una sono con non si da come ma le
-        lo ci questo al del dei della nel alla anche gli suo piu o ma se mi
-        ho ha te ne cosa quando molto dove chi perche tutto io essere fare
-        della degli""".split()),
-    "pt": frozenset("""de que nao uma dos como mas foi ao ele das tem a e os do
-        da no por mais as dos como mas ao ele das tem um para com uma nao
-        voce ja esta eu muito quando onde porque""".split()),
-    "hi": frozenset("""hai aap hai kaha kya kar rahe hain na hi main wo ye ki ka
-        se hai par kyun kaise kab kahan kuch bahut accha""".split()),
-    "ja": frozenset("""の に は を た が で て と し れ さ ある いる も する から
-        な こと として い や れる など なっ ない この ため その あっ よう また
-        こと これ する んだ 私 ので す""".split()),
-    "zh": frozenset("""的 了 是 我 你 他 她 我们 你们 这 那 在 有 和 就 不 人 都
-        一 一个 上 也 很 到 说 要 去 会 着 没有 看 好 自己 这 那""".split()),
-    "en": frozenset("""the of and to a in is it you that he was for on are as with
-        his they i at be this have from or one had by word but not what all
-        were we when your can said there use an each which she do how their
-        if will up other about out many then them these so some her would make
-        like him into time has look two more write go see number no way
-        could people my than first water been call who oil its now find long
-        down day did get come made may part""".split()),
-}
-
-
-def detect_language(text: str, hint: str | None = None) -> str:
-    """Which language a reply is written in.
-
-    Whisper's code wins when the caller already knows it (it heard the
-    user). Otherwise we sniff the reply itself, because a Hindi question
-    that gets an English answer must still be SPOKEN in English -- the
-    text the mouth has is the only language that matters for the voice.
-    Non-Latin scripts are the reliable signal; Latin-script languages are
-    told apart by their own words, and anything ambiguous stays English
-    rather than being read aloud in the wrong accent.
-    """
-    if hint:
-        raw = str(hint).strip().lower()
-        # The code as given FIRST, then its two-letter stem. Whisper's
-        # codes are normally two letters, but it reports 'yue' (Cantonese)
-        # and 'haw' whole, and other backends report ISO 639-3 ('hin',
-        # 'tam'). Truncating first turned 'yue' into 'yu', which is no
-        # language at all, so the Cantonese reply was read aloud in an
-        # English accent.
-        for cand in (raw, raw[:2]):
-            if cand in _voices():
-                return cand
-            # No kokoro voice for it, but espeak-ng can still speak it
-            # natively, so the hint stands -- voice_for() maps it to an
-            # English voice and synth_stream routes around that.
-            if espeak_voice_for(cand):
-                return cand
-    low = (text or "").lower()
-    if not low.strip():
-        return "en"
-    import re as _re
-    # Kana is checked BEFORE Han on purpose: Japanese is written with Han
-    # too, so a naive "any Han character means Chinese" test reads every
-    # Japanese sentence as Chinese. Kana present at all settles it.
-    #
-    # The rest are scripts Kokoro has no voice for. They are detected so the
-    # mouth can reach for espeak-ng instead of reading them in an English
-    # accent -- but they are deliberately NOT trusted as a hint above,
-    # because "en" there means "espeak will handle it", not "the voice
-    # table has it".
-    scripts = (
-        (r"[\u3040-\u30ff]", "ja"),
-        (r"[\u4e00-\u9fff]", "zh"),
-        (r"[\u0900-\u097f]", "hi"),
-        (r"[\u0b80-\u0bff]", "ta"),
-        (r"[\uac00-\ud7af\u1100-\u11ff]", "ko"),
-        (r"[\u0600-\u06ff]", "ar"),
-        (r"[\u0400-\u04ff]", "ru"),
-        (r"[\u0e00-\u0e7f]", "th"),
-        (r"[\u0370-\u03ff]", "el"),
-        (r"[\u0590-\u05ff]", "he"),
-        (r"[\u0d00-\u0d7f]", "ml"),
-        (r"[\u0c00-\u0c7f]", "kn"),
-        (r"[\u0c80-\u0cff]", "gu"),
-        (r"[\u0a00-\u0a7f]", "pa"),
-        (r"[\u0980-\u09ff]", "bn"),
-    )
-    for pattern, code in scripts:
-        if _re.search(pattern, text):
-            return code
-    for code, words in _LANG_HINTS:
-        for w in words:
-            # Require a word boundary in the raw text for the accented
-            # spellings, but allow the bare ASCII forms anywhere.
-            if _re.search(r"\b%s\b" % _re.escape(w), low):
-                return code
-    # Characteristic words, checked before the score. Ordered so a longer,
-    # more specific phrase beats a shorter shared one.
-    for code, phrases in _MARKERS:
-        for p in phrases:
-            if p in low:
-                return code
-    # Nothing distinctive jumped out, so score the everyday words of each
-    # language against the reply. Strip accents first: a reply typed or
-    # synthesised as "como estas" must still read as Spanish, not English.
-    words = _strip_accents(low).split()
-    if not words:
-        return "en"
-    best, best_score = "en", 0
-    for code, table in _STOPWORDS.items():
-        hits = sum(1 for w in words if w in table)
-        # English is the fallback, so it only wins on an equal score.
-        if hits > best_score or (hits == best_score > 0 and code == "en"):
-            best, best_score = code, hits
-    return best if best_score else "en"
-
-
-_turn_hint = None  # language of the CURRENT turn, from the ear
+_turn_hint = None  # language of the current turn
 
 
 def set_turn_language(lang: str | None) -> None:
-    """Record the language the user just spoke, so a reply that echoes it
-    is spoken in kind. Cleared by the next turn's transcribe."""
+    """Record the language of this turn. English is the only value it
+    carries now; the hook stays because main() and the warm path read it
+    and callers already exist."""
     global _turn_hint
     _turn_hint = (lang or None)
 
@@ -347,35 +172,9 @@ def _turn_lang() -> str | None:
     return _turn_hint
 
 
-def _strip_accents(s: str) -> str:
-    """Fold accents and punctuation off so word matching sees plain ASCII."""
-    import unicodedata
-    out = []
-    for ch in s:
-        if unicodedata.category(ch).startswith("P"):
-            out.append(" ")
-            continue
-        out.append(ch)
-    folded = unicodedata.normalize("NFKD", "".join(out))
-    return "".join(c for c in folded if not unicodedata.combining(c))
-
-
 def _voices() -> dict:
     v = CFG.get("voices") or {}
     return v if isinstance(v, dict) and v else {"en": CFG.get("voice") or "bm_lewis"}
-
-
-# The languages Kokoro can actually speak in its own voice. Derived from
-# what the model ships with, NOT from the voices table: that table also
-# carries read-in-English entries for languages Kokoro has no voice for,
-# so testing membership against it says "German is fine" when it is not.
-KOKORO_LANGS = ("en", "es", "fr", "hi", "it", "ja", "pt", "zh")
-
-
-def kokoro_langs() -> tuple:
-    """Languages Kokoro renders natively. Anything else goes to espeak-ng
-    so it is spoken in its own language instead of an English accent."""
-    return KOKORO_LANGS
 
 
 def voice_for(lang: str | None) -> str:
@@ -392,14 +191,11 @@ def voice_for(lang: str | None) -> str:
 
 
 # --- espeak-ng fallback -------------------------------------------------
-# Kokoro ships 54 voices across 9 languages. Everything else -- Tamil,
-# Korean, Arabic, Russian, Thai -- had no voice at all and was read in a
-# British English accent, which is worse than useless for someone who can
-# read the script but cannot make sense of the spoken words.
-#
-# espeak-ng covers ~100 languages including every one of those. It sounds
-# robotic next to Kokoro, so it is a fallback, not an upgrade: Kokoro is
-# used whenever it has a voice for the language.
+# English (Kokoro) is the one voice, and espeak-ng stands behind it: it
+# covers ~100 languages, sounds robotic next to a neural voice, so it
+# speaks only when Kokoro itself cannot load or fails mid-sentence. It
+# is also what tests use to render a non-English sentence for the ear --
+# input, never a reply voice.
 _ESPEAK = shutil.which("espeak-ng") or next(
     (p for p in (r"C:\Program Files\eSpeak NG\espeak-ng.exe",
                  r"C:\Program Files (x86)\eSpeak NG\espeak-ng.exe",
@@ -489,9 +285,9 @@ def warm(lang: str | None = None) -> str:
     the language pipeline: a=American English, b=British English,
     e/f/h/i/j/p/z = the other shipped languages. bm_lewis -> 'b'.
 
-    Pipelines are cached per language letter, so switching languages does
-    not reload anything already loaded; only a genuinely new language pays
-    the startup cost, once.
+    Pipelines are cached per language letter -- the table is generic on
+    purpose, even though English is the only reply voice today; loading
+    pays its startup cost once per letter, never per sentence.
     """
     global _pipe
     voice = voice_for(lang)
@@ -518,7 +314,7 @@ def split_sentences(text: str) -> list[str]:
 
 def _stream_kokoro(text: str):
     """One sentence -> int16 PCM chunks at 24kHz, in-process."""
-    voice = warm(detect_language(text, _turn_lang()))
+    voice = warm(_turn_lang())
     pipe = _pipe
     try:
         speed = float(CFG.get("speed") or 1.0)
@@ -653,14 +449,15 @@ def _elevenlabs_ready() -> bool:
 
 
 def synth_stream(text: str, timeout: float = 30.0):
-    """One sentence -> yields (sample_rate, pcm_chunk) as the TTS
-    renders. ElevenLabs when configured, Kokoro otherwise - and Kokoro
-    as the fallback on ANY ElevenLabs failure. Degrade, never mute.
+    """One sentence -> yields (sample_rate, pcm_chunk) as the TTS renders.
 
-    When the turn's language has no Kokoro voice at all, espeak-ng speaks
-    it in its own language rather than being read in an English accent.
+    ENGLISH ONLY: ElevenLabs when configured, Kokoro otherwise, espeak-ng
+    if Kokoro itself fails. There is no language routing left to do --
+    there is exactly one voice -- so even a reply the model wrote in
+    some other script still reaches the English engines rather than a
+    foreign accent, and the one outcome worse than a wrong accent,
+    silence, stays covered by the espeak-ng fallback at the bottom.
     """
-    lang = _turn_lang()
     if _elevenlabs_ready():
         try:
             for pcm in _stream_elevenlabs(text, timeout):
@@ -670,20 +467,23 @@ def synth_stream(text: str, timeout: float = 30.0):
             log(f"[mouth] elevenlabs failed ({str(e)[:60]}) - "
                 f"falling back to {CFG['voice']}")
 
-    spoken = detect_language(text, lang)
-    if spoken and spoken not in kokoro_langs() and espeak_voice_for(spoken):
-        try:
-            chunks = list(_stream_espeak(text, spoken))
-            if chunks:
-                log(f"[mouth] {spoken} has no kokoro voice - espeak-ng "
-                    f"({espeak_voice_for(spoken)}) instead of an english accent")
-                yield _espeak_rate, chunks[0]
-                return
-        except Exception as e:
-            log(f"[mouth] espeak-ng failed ({str(e)[:60]}) - using kokoro")
-
-    for pcm in _stream_kokoro(text):
-        yield KOKORO_RATE, pcm
+    got = False
+    try:
+        for pcm in _stream_kokoro(text):
+            got = True
+            yield KOKORO_RATE, pcm
+        if got:
+            return
+    except Exception as e:
+        log(f"[mouth] kokoro failed ({str(e)[:60]}) - espeak-ng fallback")
+    try:
+        for pcm in _stream_espeak(text, "en"):
+            log("[mouth] espeak-ng (en) speaking english")
+            yield _espeak_rate, pcm
+            return
+    except Exception as e:
+        log(f"[mouth] espeak-ng failed ({str(e)[:60]})")
+    log("[mouth] no engine could speak this reply")
 
 
 class Mouth:

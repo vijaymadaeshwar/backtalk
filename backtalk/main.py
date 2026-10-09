@@ -60,12 +60,15 @@ Say "goodbye <name>" / "end voice mode" to hang up. Ctrl-C works.
 """
 import asyncio
 import json
+import os
 import queue
 import re
 import socket
 import sys
 import threading
 import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 from backtalk import signals
 from backtalk.brain import WarmBrain
@@ -73,12 +76,22 @@ from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
                            strip_wake, warm as warm_ears)
 from backtalk.journal import Journal, summarize as journal_summarize
-from backtalk.mouth import Mouth
+from backtalk.mouth import Mouth, set_turn_language
 from backtalk.ptt import PTTListener
 from backtalk.vlog import log
 
 NAME = CFG["name"]
 QUIT_PHRASES = CFG["quit_phrases"]
+
+# Waits that never finish on their own -- ptt.wait_press, typed_q.get,
+# the open-mic capture, the ears warm -- run HERE, not in asyncio's
+# default executor. Runner.close() joins every default-executor worker,
+# so one still inside wait_press made "end voice mode" log "[backtalk]
+# hung up" and then hang FOREVER with the instance lock held (py-spy:
+# Thread-4 _do_shutdown -> executor.shutdown -> join, MainThread parked
+# in runners.close). This pool is invisible to the runner; the clean
+# exit kills its threads with os._exit like every other one.
+_BLOCKERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix="blocker")
 
 # ---- THE SPOKEN PERMISSION GATE (permission_mode "ask", the default).
 # When the agent wants a gated tool, the SDK routes the decision here:
@@ -813,7 +826,7 @@ async def amain():
     loop = asyncio.get_event_loop()
     # Warm the engines while the greeting plays: the STT model load and
     # the brain's prompt-cache toll both hide behind the spoken line.
-    loop.run_in_executor(None, warm_ears)
+    loop.run_in_executor(_BLOCKERS, warm_ears)
     # THE BRAIN CONNECT, guarded. This is the one startup step that
     # needs a working opencode install, a configured provider, the
     # internet, and available quota.
@@ -997,12 +1010,14 @@ async def amain():
         told apart from speech that began before the ask even existed."""
         nonlocal speak_task
         log(f"[you]    {text}")
-        # Whatever language they just spoke in becomes this turn's language:
-        # the model is told to answer in kind, and the mouth is told which
-        # voice to read that answer with. Typed input has no detected
-        # language, so it falls through to sniffing the answer's text.
-        spoken = None if _TYPED else ears.last_language()
-        mouth.set_turn_language(spoken)
+        # ENGLISH ONLY. The ear keeps hearing whatever the room says --
+        # Tamil, Hindi, anything -- but this assistant answers in
+        # English every time: one language, one voice. The prompt says
+        # the same; this is the belt to its braces, because a reply in
+        # any other language reaching the speaker is a failure even
+        # when the content is right.
+        spoken = "en"
+        set_turn_language(spoken)
         signals.language(spoken)
         # A pending spoken permission ask owns the next utterance IF
         # that utterance started after the ask was posed. Speech that
@@ -1129,15 +1144,15 @@ async def amain():
                 if mic_fut is not None and mic_fut.done():
                     mic_fut.result(); mic_fut = None
             if typed_fut is None:
-                typed_fut = loop.run_in_executor(None, typed_q.get)
+                typed_fut = loop.run_in_executor(_BLOCKERS, typed_q.get)
             if press_fut is None:
-                press_fut = loop.run_in_executor(None, ptt.wait_press)
+                press_fut = loop.run_in_executor(_BLOCKERS, ptt.wait_press)
             waiters = {press_fut, typed_fut}
             if _MIC["mode"] == "open":
                 if mic_fut is None:
                     g = _MIC["gen"]
                     mic_fut = loop.run_in_executor(
-                        None, lambda g=g: capture_open(g))
+                        _BLOCKERS, lambda g=g: capture_open(g))
                 waiters.add(mic_fut)
             done, _ = await asyncio.wait(
                 waiters, return_when=asyncio.FIRST_COMPLETED)
@@ -1189,7 +1204,9 @@ async def amain():
                 _MIC["btn"] = True               # open mic yields to the button
                 try:
                     text = await loop.run_in_executor(
-                        None, lambda: record_held(ptt.is_held))
+                        _BLOCKERS, lambda: record_held(
+                            ptt.is_held,
+                            on_release=lambda: signals.set_state("thinking")))
                 except Exception as e:
                     # A device-level failure gets plain words instead of a
                     # raw exception. The pre-flight at startup cannot catch
@@ -1297,6 +1314,34 @@ def main():
         asyncio.run(amain())
     except KeyboardInterrupt:
         print("\n[backtalk] interrupted — hanging up", flush=True)
+    except BaseException:
+        # The traceback normally goes to stderr, which is detached when
+        # the supervisor spawns us, so a crash used to leave the bus
+        # parked at "hung up" and NOTHING in the log to explain it. Land
+        # it in backtalk.log, then die FOR REAL: a dead loop inside a
+        # live process reads as a healthy voice to the supervisor, and it
+        # will never restart what it believes is running. (os._exit, not
+        # sys.exit, because a lingering non-daemon thread otherwise keeps
+        # the corpse alive past shutdown.)
+        try:
+            log("[backtalk] CRASH — the voice line died:\n"
+                + traceback.format_exc())
+        except BaseException:
+            pass
+        os._exit(1)
+    # The CLEAN path needs os._exit for the exact reason the crash path
+    # above does: the whisper/ctranslate2 threadpool threads are
+    # non-daemon and never finish, so interpreter shutdown hangs forever
+    # AFTER "[backtalk] hung up" is already logged — a corpse that still
+    # holds the instance lock and the signal bus, which the supervisor
+    # reads as a healthy voice line that can never be restarted. (Seen
+    # live: 31 threads, 74s CPU, :8791 held minutes after hangup.)
+    # park() first because atexit does not run under os._exit.
+    try:
+        signals.park()
+    except BaseException:
+        pass
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -72,7 +72,11 @@ def one_turn(utterance, spoken_hint=None):
     check("ear produced text", bool(text.strip()), repr(text))
     check("ear detected a language", lang is not None)
 
-    # 2. the mouth is told which language this turn is in
+    # 2. the turn-language hook still round-trips. Replies are English-
+    # only since the language refactor (main() always passes "en"); the
+    # hook stays so the warm path and existing callers keep one contract,
+    # and voice_for must resolve ANY code to the one English voice
+    # rather than to nothing.
     mouth.set_turn_language(lang)
     check("turn language recorded",
           (mouth._turn_lang() or None) == (lang or None),

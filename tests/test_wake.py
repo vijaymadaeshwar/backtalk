@@ -9,6 +9,13 @@ from backtalk.ears import Ears, is_wake, strip_wake  # noqa: E402
 
 PHRASES = ["hey seyon", "hey sayon", "hey sean", "a seyon"]
 
+# Tamil-script wake forms like the live config carries (wake is
+# input-side: waking in Tamil still gets an English reply), and the
+# utterance the room ACTUALLY produced (logged 21:42 -- a real wake
+# attempt that missed).
+TAMIL = ["சேயோன்", "சேயன்", "ஏ சேயோன்"]
+LIVE = "வணக்கம் சேயோன, நோட்பைட் திறக்கவும்."
+
 
 def check(name, cond, detail=""):
     print("    %s %s%s" % ("ok  " if cond else "FAIL", name,
@@ -55,6 +62,27 @@ def test_strip_preserves_command():
           == "tell me about Paris")
 
 
+def test_tamil_as_whisper_wrote_it():
+    print("\n--- tamil, exactly as whisper transcribed it live ---")
+    # Two things used to break here, both real: whisper drops the final
+    # pulli (U+0BCD) from the name, and \\b refuses to match a word that
+    # ENDS in a virama before punctuation. The live near-miss proves it:
+    # the room said the phrase and nothing happened.
+    check("pulli dropped -> still wakes", is_wake(LIVE, TAMIL))
+    check("pulli present -> wakes",
+          is_wake("வணக்கம் சேயோன், நோட்பைட் திறக்கவும்.", TAMIL))
+    check("no punctuation -> wakes",
+          is_wake("வணக்கம் சேயோன் நோட்பைட் திறக்கவும்", TAMIL))
+    check("the ஏ-form wakes", is_wake("ஏ சேயோன், எப்படி இருக்கிறீர்கள்?", TAMIL))
+    check("no name -> no wake",
+          not is_wake("வணக்கம், நோட்பைட் திறக்கவும்.", TAMIL))
+    check("inside a longer tamil word",
+          not is_wake("சேயோன்மகன் வருகிறான்.", TAMIL))
+    check("strip leaves the command",
+          strip_wake(LIVE, TAMIL) == "வணக்கம் , நோட்பைட் திறக்கவும்",
+          detail=strip_wake(LIVE, TAMIL))
+
+
 def test_wait_for_wake_loop():
     print("\n--- wait_for_wake ignores speech until the phrase ---")
     import backtalk.ears as ears_mod
@@ -94,6 +122,7 @@ print("=" * 66)
 
 test_recognition()
 test_no_false_positives()
+test_tamil_as_whisper_wrote_it()
 test_strip_preserves_command()
 test_wait_for_wake_loop()
 test_wait_for_wake_command_in_breath()
