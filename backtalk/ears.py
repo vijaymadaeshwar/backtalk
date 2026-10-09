@@ -549,7 +549,7 @@ def _min_speech_frames() -> int:
 
 
 class Ears:
-    def __init__(self, aggressiveness: int = 3, silence_ms: int = 480):
+    def __init__(self, aggressiveness: int = 3, silence_ms: int = 300):
         # 3 is the strictest level: it takes clearer speech to open the
         # mic, which is what keeps a fan/AC/TV room from feeding whisper
         # a near-silence stream to hallucinate over. Drop to 2 if a
