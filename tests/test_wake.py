@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backtalk.config import DEFAULTS  # noqa: E402
 from backtalk.ears import Ears, is_wake, strip_wake  # noqa: E402
 
-PHRASES = ["hey seyon", "hey sayon", "hey sean", "a seyon"]
+PHRASES = ["hey seyon", "hey sayon", "hey sean", "hey siyon"]
 
 
 def check(name, cond, detail=""):
@@ -68,6 +68,12 @@ def test_default_phrases_are_english():
           all(p.isascii() for p in phrases),
           [p for p in phrases if not p.isascii()])
     check("an English default wakes", is_wake("hey seyon", phrases))
+    check("every default carries a greeting, not the bare name",
+          all(len(p.split()) >= 2 for p in phrases), phrases)
+    check("the bare name alone does not wake it",
+          not is_wake("seyon", phrases))
+    check("the name in a sentence does not wake it",
+          not is_wake("...so seyon said hello", phrases))
 
 
 def test_wait_for_wake_loop():

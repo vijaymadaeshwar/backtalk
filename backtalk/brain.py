@@ -47,10 +47,6 @@ _IO = ThreadPoolExecutor(max_workers=8, thread_name_prefix="brain-io")
 SESSION_FILE = os.path.join(CFG["signals_dir"], ".backtalk_session")
 
 
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-
 class OpencodeError(RuntimeError):
     pass
 
@@ -467,8 +463,8 @@ class WarmBrain:
         if not srv or not sid:
             log("[brain] ask_stream with no session")
             return
-        model, full = self._model_ref()
-        body = {
+        model, _ = self._model_ref()
+        body: dict[str, Any] = {
             "model": model,
             "system": self._system(),
             "parts": [{"type": "text", "text": utterance}],

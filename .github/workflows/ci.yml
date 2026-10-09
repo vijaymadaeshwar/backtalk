@@ -30,6 +30,8 @@ jobs:
 
       # --fast skips the suites that download whisper weights or start a
       # TTS engine: those are minutes long and belong on a dev machine,
-      # not on every push.
-      - name: tests
-        run: uv run python tests/run_all.py --fast
+      # not on every push. --coverage runs the same suites under
+      # coverage.py and fails if backtalk/ drops below the floor in
+      # tests/run_all.py -- the goal is that the number never goes down.
+      - name: tests + coverage
+        run: uv run python tests/run_all.py --fast --coverage

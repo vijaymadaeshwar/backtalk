@@ -7,6 +7,8 @@ finds them, runs each in its own process, and summarises.
     uv run python tests/run_all.py          the standard suites
     uv run python tests/run_all.py --fast   skip the model-loading suites (CI)
     uv run python tests/run_all.py --all    include the live/e2e suites
+    uv run python tests/run_all.py --fast --coverage   measure backtalk/ and
+                                                       enforce the floor
 
 Some suites are pure control-flow with a faked mic and transcriber and
 run in seconds. Others run the real Whisper decoder, the real brain over
@@ -17,6 +19,10 @@ stack running (brain on 4599, face on 8790).
 | script | what it proves |
 | --- | --- |
 | `test_wake.py` | Wake phrases are recognised however whisper spells or punctuates them, stripped without damaging the command, and the shipped phrases are Latin-only. |
+| `test_pipeline.py` | One whole turn offline: a scripted mic through the real endpointer and wake gate, `strip_wake`, and the real sentence batching into a fake mouth and brain. |
+| `test_brain.py` | The brain against a fake opencode server: sentence streaming, reasoning-vs-text filtering, empty/timed-out/errored turns, permission routing, slash-commands, usage tallying -- plus a real localhost HTTP+SSE server for the wire code. |
+| `test_signals.py` | Every file the signal bus writes: state, caption, language, directions, rate limits, reply-done, waveform -- and that no write ever raises. |
+| `test_ducking.py` | Spotify duck/restore/debounce logic with the AppleScript bridge stubbed, the off-macOS no-ops, and the permission-result vocabulary. |
 | `test_endpointing.py` | The open-mic endpointer opens and closes on schedule, and the hands-free gates (loudness floor, minimum phrase length, and the model's own no-speech score) drop noise before whisper sees it. |
 | `test_ptt.py` | Hold-to-talk timing: the release callback fires before transcription, taps are ignored, the time cap still proceeds. |
 | `test_ptt_headless.py` | A machine with no keyboard backend (CI) still imports `backtalk.main`, and asking for a key listener fails cleanly instead of taking the line down. |

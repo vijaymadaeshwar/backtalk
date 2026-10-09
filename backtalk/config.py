@@ -229,11 +229,13 @@ DEFAULTS = {
     # treating what was said as a command. Say the phrase alone and the
     # next utterance is the command; say it with the command in one breath
     # ("hey seyon, what's the weather") and that counts too. Phrase
-    # variants catch the ways whisper spells "Seyon".
+    # variants catch the ways whisper spells "Seyon", and each carries a
+    # greeting on purpose: the bare name is too easy to trip over in
+    # ordinary speech ("...so Sean said...").
     "wake_word": False,
     "wake_word_phrases": [
         "hey seyon", "hey sayon", "hey sean", "hey saiyan",
-        "a seyon", "hey siyon",
+        "hey siyon",
     ],
     # The microphone to record from, matched by NAME. "" means whatever
     # the OS calls the default input, which is right on most machines.

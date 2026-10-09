@@ -97,13 +97,13 @@ class PTTListener:
     # is ~30ms) and short enough that letting go still feels instant.
     RELEASE_GRACE = 0.12
 
-    def __init__(self, key="home"):
+    def __init__(self, key: str = "home"):
         if keyboard is None:
             raise RuntimeError(
                 "hold-to-talk needs a desktop session, but the keyboard "
                 f"backend would not start ({_PTT_ERROR}). Use the open "
                 "microphone (\"Hey Seyon\") instead.")
-        self._key = resolve_key(key) if isinstance(key, str) else key
+        self._key = resolve_key(key)
         self._held = False
         self._release_t = None          # a release awaiting confirmation
         self._press_evt = threading.Event()

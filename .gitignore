@@ -22,6 +22,11 @@ show.json
 # Config backups the setup wizard leaves behind.
 *.json.*.bak
 
+# coverage.py's data file and HTML report, written by `run_all.py --coverage`.
+.coverage
+.coverage.*
+htmlcov/
+
 # The user's own copy of backtalk.json. Every setting in it is already in
 # config.py's DEFAULTS -- what this file adds is machine-specific: absolute
 # paths and the assistant's name. Committing those would bake one person's

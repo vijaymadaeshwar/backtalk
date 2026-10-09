@@ -7,8 +7,10 @@ process, and summarises.
     uv run python tests/run_all.py          the standard suites
     uv run python tests/run_all.py --all    also the live / e2e suites
     uv run python tests/run_all.py --fast   skip anything that loads a model
+    uv run python tests/run_all.py --coverage   measure backtalk coverage
 
 --fast is what CI runs: no whisper, no kokoro, no audio hardware.
+--coverage runs each suite under coverage.py and fails under the floor.
 """
 import os
 import subprocess
@@ -22,6 +24,13 @@ HERE = Path(__file__).resolve().parent
 HEAVY = {"test_stt_langs.py", "test_espeak_fallback.py"}
 # Suites that need the live stack running. Opt in with --all.
 LIVE = {"test_e2e.py", "test_live_path.py"}
+# The coverage floor the fast suites must clear. The number is what the
+# offline suites actually reach for backtalk/ (measured 37% in late 2026);
+# it is a ratchet, not a target. The uncovered remainder is what a fast,
+# headless run cannot reach: real audio playback (mouth), the live event
+# loop (main.amain), the whisper model (ears), and live webfetch (live).
+# Raise this whenever the real number rises -- never lower it to pass.
+COVERAGE_FLOOR = 35
 
 
 def discover(fast: bool, every: bool) -> list[str]:
@@ -39,11 +48,16 @@ def discover(fast: bool, every: bool) -> list[str]:
 def main(argv: list[str]) -> int:
     fast = "--fast" in argv
     every = "--all" in argv
+    cov = "--coverage" in argv
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     chosen = discover(fast, every)
     if not chosen:
         print("no suites selected")
         return 1
+    runner = [sys.executable]
+    if cov:
+        subprocess.run([sys.executable, "-m", "coverage", "erase"], env=env)
+        runner += ["-m", "coverage", "run", "--append"]
     tag = " [fast]" if fast else (" [all]" if every else "")
     print(f"running {len(chosen)} suite(s){tag}\n")
     failed = []
@@ -51,13 +65,20 @@ def main(argv: list[str]) -> int:
         print("=" * 66)
         print(name)
         print("=" * 66)
-        proc = subprocess.run([sys.executable, str(HERE / name)], env=env)
+        proc = subprocess.run(runner + [str(HERE / name)], env=env)
         if proc.returncode != 0:
             failed.append(name)
         print()
     print("=" * 66)
     passed = len(chosen) - len(failed)
     print(f"{passed}/{len(chosen)} suites passed")
+    if cov:
+        print("=" * 66)
+        rep = subprocess.run(
+            [sys.executable, "-m", "coverage", "report",
+             f"--fail-under={COVERAGE_FLOOR}"], env=env)
+        if rep.returncode != 0:
+            failed.append(f"coverage<{COVERAGE_FLOOR}%")
     if failed:
         print("FAILED: " + ", ".join(failed))
         return 1

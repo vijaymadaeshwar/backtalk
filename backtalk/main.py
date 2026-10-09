@@ -69,6 +69,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from backtalk import signals
 from backtalk.brain import WarmBrain
@@ -100,9 +101,9 @@ _BLOCKERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix="blocker")
 # answer. "yes" approves; anything else denies, with the user's own
 # words passed back as the reason. Silence means no.
 PERM_TIMEOUT_S = 75
-_PERM = {"fut": None, "asked_at": 0.0,   # pending ask + when it was posed
-         "hinted": False}                # escape-hatch hint said yet?
-_CONFIRM = {"verb": None, "at": 0.0}     # pending "say confirm" + when
+_PERM: dict[str, Any] = {"fut": None, "asked_at": 0.0,  # pending ask + when
+                         "hinted": False}              # hint said yet?
+_CONFIRM: dict[str, Any] = {"verb": None, "at": 0.0}   # pending "say confirm"
 _INTERRUPT_ANSWER = "\x00interrupt"      # sentinel: turn is being killed
 # Live AUTO-APPROVE is OUR flag, not an SDK mode flip: the CLI refuses
 # a live switch INTO bypassPermissions unless it was launched with the
@@ -116,14 +117,14 @@ _INTERRUPT_ANSWER = "\x00interrupt"      # sentinel: turn is being killed
 # SDK routes here. (Auto-approve is about PERMISSIONS; hands-free
 # LISTENING is about the microphone: see _MIC below. Two different
 # axes, deliberately never sharing a name.)
-_AUTOAPPROVE = {"on": False}
+_AUTOAPPROVE: dict[str, Any] = {"on": False}
 # The microphone mode, switchable live by voice. "ptt" = mic closed
 # except while the key is held. "open" = hands-free listening (VAD).
 # The key keeps working in open mode: it interrupts, and holding it
 # always gets you heard. gen bumps on every switch so an in-flight
 # open-mic capture from before the switch gets discarded, never
 # processed.
-_MIC = {"mode": "ptt", "gen": 0, "btn": False}
+_MIC: dict[str, Any] = {"mode": "ptt", "gen": 0, "btn": False}
 
 # Approvals are EXACT matches after normalization, never prefixes:
 # "yesterday", "yes or no", and "yes, but do not overwrite" must all
@@ -1165,10 +1166,8 @@ async def amain():
                 waiters.add(mic_fut)
             done, _ = await asyncio.wait(
                 waiters, return_when=asyncio.FIRST_COMPLETED)
-            _TYPED = False
             if typed_fut in done:
                 text = typed_fut.result(); typed_fut = None
-                _TYPED = True
                 if text and not await handle(text):
                     return
                 continue

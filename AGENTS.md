@@ -77,13 +77,17 @@ hand with a UTF-8 (no BOM) editor.
 uv sync                              # install (deps + the dev group)
 uv run python -m backtalk.main       # run the voice line
 uv run ruff check backtalk tests     # lint (error-level rules)
-uv run pyright                       # type gate (basic mode)
+uv run pyright                       # type gate (strict, minus unknowable
+                                     #   third-party types -- see pyproject)
 uv run python tests/run_all.py       # every suite
 uv run python tests/run_all.py --fast   # skip the model-loading suites (CI)
 uv run python tests/run_all.py --all    # include the live/e2e suites
+uv run python tests/run_all.py --fast --coverage   # add the coverage floor
 ```
 
-All four must be green before a change is done. `--fast` is what CI runs.
+All of them must be green before a change is done. `--fast --coverage` is
+what CI runs; the floor lives in `tests/run_all.py` (`COVERAGE_FLOOR`) and
+only ever goes up.
 
 ## Test conventions
 
@@ -92,8 +96,11 @@ There is no pytest here on purpose. A test is a standalone script that:
 - inserts the repo root on `sys.path` before importing `backtalk.*`;
 - prints `ok`/`FAIL` lines and ends with `sys.exit(1 if FAILURES else 0)`;
 - fakes the hardware and the models (see `test_ptt.py`,
-  `test_endpointing.py`) so it is deterministic and needs no mic, no
-  whisper, and no network.
+  `test_endpointing.py`, `test_brain.py`) so it is deterministic and needs
+  no mic, no whisper, and no network. `test_brain.py` swaps in a fake
+  opencode server and also boots a real localhost HTTP+SSE server to cover
+  the wire code; `test_signals.py` points the bus at a temp dir;
+  `test_ducking.py` stubs the AppleScript bridge.
 
 When you add a suite, `run_all.py` picks it up automatically. If it
 downloads a model or starts an engine, add its filename to `HEAVY`; if it

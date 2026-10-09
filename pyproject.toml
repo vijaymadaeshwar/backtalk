@@ -45,6 +45,7 @@ package = false
 
 [dependency-groups]
 dev = [
+    "coverage>=7.6",
     "pyright>=1.1.390",
     "ruff>=0.16.10",
 ]
@@ -78,10 +79,44 @@ select = [
 [tool.pyright]
 include = ["backtalk"]
 pythonVersion = "3.11"
-typeCheckingMode = "basic"
-# sounddevice, webrtcvad, faster-whisper and kokoro ship no type
-# information. That is not a mistake in our code, so a missing stub is
-# not a gate failure -- but a real error in OUR code still is.
+# Strict, with one honest carve-out. The audio/ML stack (sounddevice,
+# webrtcvad, faster-whisper, kokoro, mlx, numpy) ships no type
+# information, so pyright cannot resolve the type of anything flowing
+# through it. In strict mode that becomes ~630 errors across six
+# rules that all say the same thing: "the type came from a library we
+# cannot see". Silencing exactly those rules keeps every real check --
+# wrong attribute, unguarded None, unreachable return, bad operator --
+# while not drowning in unknowable third-party types.
+typeCheckingMode = "strict"
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportUnknownLambdaType = false
+reportMissingParameterType = false
+reportMissingTypeArgument = false
 reportMissingTypeStubs = false
 reportMissingModuleSource = false
+# Module-level state is reassigned on purpose here: DISCIPLINE is built
+# up in stages, the wake gate keeps a last-score global, the ptt module
+# records its own import error. Reassigning an UPPERCASE module global is
+# exactly what those are, so this stylistic rule is off, not the code.
+reportConstantRedefinition = false
+
+# Coverage of backtalk itself, measured by `tests/run_all.py --coverage`
+# (each fast suite runs under coverage.py). The floor lives in that
+# runner so a local `coverage report` can still be read at any level.
+[tool.coverage.run]
+source = ["backtalk"]
+branch = true
+relative_files = true
+
+[tool.coverage.report]
+skip_covered = true
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
 

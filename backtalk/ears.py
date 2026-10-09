@@ -277,10 +277,10 @@ def _reopen_after_device_change(opts):
     """
     log("[ears] the audio devices changed -- rebuilding and reopening")
     try:
-        sd._terminate()
+        sd._terminate()                # pyright: ignore[reportPrivateUsage]
     except Exception:
         pass                           # already down; re-initialising is the point
-    sd._initialize()
+    sd._initialize()                   # pyright: ignore[reportPrivateUsage]
     return sd.InputStream(**opts)
 
 
