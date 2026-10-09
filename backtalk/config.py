@@ -202,6 +202,13 @@ DEFAULTS = {
     # you want English forced no matter what is said. Accepts the two-letter
     # codes whisper uses.
     "stt_language": "",
+    # Hands-free loudness floor, in int16 RMS, for a captured utterance to
+    # reach whisper at all. VAD passes a fan, a music bed, or a TV tail as
+    # "speech shaped", and whisper then invents sentences over it
+    # ("Thanks for watching!"); this is the loudness test VAD skips. Only
+    # the OPEN-MIC path is gated -- hold-to-talk records exactly what the
+    # person chose to record. 0 turns the gate off.
+    "stt_min_rms": 200,
     # Barge-in: if true, listen while speaking (open mic) so a new
     # utterance interrupts the reply as soon as it is detected.
     "barge_in": False,
@@ -333,7 +340,7 @@ DISCIPLINE = DISCIPLINE + " " + (
 CLOCK = ("__CLOCK__", "%A, %d %B %Y at %H:%M")
 
 
-def refresh_clock(text: str = None) -> str:
+def refresh_clock(text: str | None = None) -> str:
     """The discipline with the current date and time substituted in.
 
     The timestamp used to be formatted at import, which meant a process left

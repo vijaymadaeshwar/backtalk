@@ -53,7 +53,7 @@ def _init_console():
         pass
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            stream.reconfigure(encoding="utf-8", errors="replace")  # pyright: ignore[reportAttributeAccessIssue]
         except Exception:
             pass
 

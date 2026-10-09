@@ -125,18 +125,21 @@ class Journal:
         hangup. Returns the path written, or None if nothing was written."""
         if not self.active or not self.events:
             return None
+        directory = self.directory
+        if directory is None:            # not active, checked above; narrows
+            return None
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
+            directory.mkdir(parents=True, exist_ok=True)
             stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            path = self.directory / ("voice-session_%s.md" % _safe(stamp))
+            path = directory / ("voice-session_%s.md" % _safe(stamp))
             # Seconds are not enough. Starting, stopping and restarting inside
             # one second is ordinary, and the second file would silently
             # overwrite the first: a lost session, with no error anywhere.
             # So if the name is taken, add a counter until it is not.
             n = 2
             while path.exists():
-                path = self.directory / ("voice-session_%s_%d.md"
-                                        % (_safe(stamp), n))
+                path = directory / ("voice-session_%s_%d.md"
+                                    % (_safe(stamp), n))
                 n += 1
             path.write_text(self.render(summary), encoding="utf-8")
             return path

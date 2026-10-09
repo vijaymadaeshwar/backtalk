@@ -18,6 +18,7 @@ Transport: opencode's local HTTP server (`opencode serve`). The server is
 started on demand if it isn't already running, and reused if it is.
 """
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -27,12 +28,20 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from typing import Any
 
 from backtalk import live, signals
 from backtalk.config import CFG, DISCIPLINE, refresh_clock
 from backtalk.vlog import log
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s")
+
+# One bounded pool for every blocking call the brain makes into the stdlib
+# (HTTP requests, the SSE socket, live-data fetches). The default executor
+# is per-process and shared with anything else that calls
+# run_in_executor(_IO, ...), so a slow or stuck call could quietly eat
+# threads the rest of the process needs. 8 matches main.py's _BLOCKERS.
+_IO = ThreadPoolExecutor(max_workers=8, thread_name_prefix="brain-io")
 
 
 SESSION_FILE = os.path.join(CFG["signals_dir"], ".backtalk_session")
@@ -145,7 +154,7 @@ class _Server:
         return f"{url}?{urllib.parse.urlencode(q)}" if q else url
 
     async def request(self, method: str, path: str, body=None,
-                      directory: str | None = None, timeout: int = 300):
+                      directory: str | None = None, timeout: int = 300) -> Any:
         def call():
             data = json.dumps(body).encode() if body is not None else None
             req = urllib.request.Request(
@@ -154,7 +163,7 @@ class _Server:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
                 return json.loads(raw) if raw else None
-        return await asyncio.get_running_loop().run_in_executor(None, call)
+        return await asyncio.get_running_loop().run_in_executor(_IO, call)
 
     # ---- SSE event stream ---------------------------------------------
     async def _start_reader(self):
@@ -175,13 +184,13 @@ class _Server:
             return urllib.request.urlopen(url, timeout=600)
 
         try:
-            stream = await loop.run_in_executor(None, open_stream)
+            stream = await loop.run_in_executor(_IO, open_stream)
         except Exception as e:
             log(f"[brain] event stream failed to open: {e!r}")
             return
         try:
             while True:
-                line = await loop.run_in_executor(None, stream.readline)
+                line = await loop.run_in_executor(_IO, stream.readline)
                 if not line:
                     break
                 text = line.decode("utf-8", "replace").strip()
@@ -283,7 +292,7 @@ class WarmBrain:
             "POST", "/session", {"title": f"voice - {CFG['name']}"},
             directory=self._dir, timeout=30)
         self._sid = sess["id"]
-        log(f"[brain] new session {self._sid[:8]}")
+        log(f"[brain] new session {str(self._sid)[:8]}")
 
     async def stop(self):
         if self._srv:
@@ -375,8 +384,11 @@ class WarmBrain:
         self._dirty = False
         await self.interrupt()
         deadline = time.time() + timeout
+        srv = self._srv
+        if srv is None:
+            return
         while time.time() < deadline:
-            ev = await self._srv.next_event(timeout=max(0.1, deadline - time.time()))
+            ev = await srv.next_event(timeout=max(0.1, deadline - time.time()))
             if ev is None:
                 return
             if ev.get("type") in ("session.idle", "session.error"):
@@ -395,6 +407,8 @@ class WarmBrain:
                 await self.start()
                 return "cleared"
             if text.startswith("/compact"):
+                if self._srv is None:
+                    return "not started"
                 model, _ = self._model_ref()
                 await self._srv.request(
                     "POST", f"/session/{self._sid}/summarize", {"model": model},
@@ -440,9 +454,9 @@ class WarmBrain:
             return ""
         loop = asyncio.get_running_loop()
         try:
-            if not await loop.run_in_executor(None, live.wants_live, utterance):
+            if not await loop.run_in_executor(_IO, live.wants_live, utterance):
                 return ""
-            return await loop.run_in_executor(None, live.fetch, utterance)
+            return await loop.run_in_executor(_IO, live.fetch, utterance)
         except Exception as e:
             log(f"[live] lookup failed, answering without it: {e!r}")
             return ""
@@ -506,7 +520,7 @@ class WarmBrain:
             if kind == "message.part.delta" and props.get("field") == "text":
                 if props.get("sessionID") != sid:
                     continue
-                pid = props.get("partID")
+                pid = str(props.get("partID") or "")
                 # An unknown part id is a text part in practice: the
                 # delta can beat its own `updated` event across the wire.
                 if kinds.get(pid, "text") != "text":
@@ -637,8 +651,11 @@ class WarmBrain:
                 log(f"[brain] permission gate raised: {e!r}")
                 allow = False
 
+        srv = self._srv
+        if srv is None:
+            return
         try:
-            await self._srv.request(
+            await srv.request(
                 "POST", f"/session/{sid}/permissions/{pid}",
                 {"response": "once" if allow else "reject"},
                 directory=self._dir, timeout=30)

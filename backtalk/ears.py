@@ -31,9 +31,9 @@ import platform
 import re
 import sys
 import threading
-import unicodedata
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import sounddevice as sd
@@ -47,48 +47,27 @@ FRAME_MS = 30
 FRAME_LEN = RATE * FRAME_MS // 1000  # samples per frame
 OPEN_FRAMES = 4        # ~120ms speech to open an utterance
 MAX_UTTER_S = 30
+# Hands-free loudness floor, in int16 RMS, that a captured "speech" run
+# must clear before whisper sees it. 0 disables the gate.
+MIN_SPEECH_RMS = 200
 
 _NONSPEECH = re.compile(r"[\[(][^\])]*[\])]")
-
-
-_VIRAMA = "\u0bcd"  # Tamil pulli: whisper drops it, so the phrase must not need it
-
-# The edge class for wake matching: \w (letters, digits, underscore) plus
-# the whole Tamil block, because Tamil vowel signs and the virama are
-# MARKS -- str.isalnum() is false for them, so plain \w misses them.
-_EDGE = r"[\w\u0b80-\u0bff]"
-
-
-def _wake_word(word: str) -> str:
-    """Escape one wake word, letting every Tamil virama go missing.
-
-    Whisper wrote "சேயோன" for "சேயோன்" -- the same name with the final
-    pulli dropped -- so a literal pattern never matched what was actually
-    heard. Making each virama optional accepts both spellings while the
-    letter skeleton stays exact ("சேயன்" still does not match)."""
-    out = []
-    for ch in word:
-        if ch == _VIRAMA:
-            out.append(re.escape(_VIRAMA) + "?")
-        else:
-            out.append(re.escape(ch))
-    return "".join(out)
 
 
 def _wake_re(phrase: str) -> re.Pattern:
     """A tolerant matcher for one wake phrase.
 
     Whisper does not punctuate consistently ("Hey, Seyon!"), so allow any
-    run of spaces/punctuation between the words. The edges use explicit
-    character classes instead of \\b: a word ending in virama is followed
-    by a NON-word character, so \\b would refuse to match "சேயோன்," --
-    and the wider class still stops the name matching inside a longer
-    word, English or Tamil."""
-    words = [_wake_word(w)
-             for w in unicodedata.normalize("NFC", phrase).lower().split()]
-    return re.compile(r"(?<!%s)" % _EDGE
-                      + r"[\s,.\-!?]*".join(words)
-                      + r"(?!%s)" % _EDGE,
+    run of spaces/punctuation between the words. \\b on the edges keeps
+    the name from matching inside a longer word ("seyonic").
+
+    English only on purpose. Wake phrases used to include Tamil forms,
+    with a virama-tolerant matcher to catch whisper's spelling of them;
+    that machinery is gone -- the wake phrase is Latin, and a Tamil-script
+    phrase no longer matches anything.
+    """
+    words = [re.escape(w) for w in phrase.lower().split()]
+    return re.compile(r"\b" + r"[\s,.\-!?]*".join(words) + r"\b",
                       re.IGNORECASE)
 
 
@@ -111,7 +90,7 @@ def strip_wake(text: str, phrases) -> str:
     return (text or "").strip()
 
 
-_model = None
+_model: Any = None
 _model_lock = threading.Lock()
 _backend = None          # "mlx" once the GPU path loads, else "faster-whisper"
 
@@ -209,9 +188,6 @@ def _stt() -> str:
     if _stt_cache is None:
         _stt_cache = _resolve_stt_model()
     return _stt_cache
-
-
-_last_lang = None
 
 
 _mic_checked = False
@@ -416,7 +392,7 @@ def warm():
     with _model_lock:
         if _model is None:
             if _apple_gpu_available():
-                import mlx_whisper
+                import mlx_whisper  # pyright: ignore[reportMissingImports]
                 repo = _mlx_repo(_stt())
                 log(f"[ears] loading {_stt()} on the Apple GPU...")
                 # This API has no separate load call: the first transcribe
@@ -486,7 +462,7 @@ def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
     hint = (CFG.get("stt_prompt") or "").strip() or None
     detected = None
     if _backend == "mlx":
-        import mlx_whisper
+        import mlx_whisper  # pyright: ignore[reportMissingImports]
         res = mlx_whisper.transcribe(audio, path_or_hf_repo=model,
                                      temperature=0.0, language=lang,
                                      initial_prompt=hint,
@@ -504,9 +480,27 @@ def transcribe_language(pcm: np.ndarray) -> tuple[str, str | None]:
             condition_on_previous_text=False, no_speech_threshold=0.8)
         text = "".join(s.text for s in segments).strip()
         detected = getattr(info, "language", None)
-    global _last_lang
-    _last_lang = detected or lang or None
-    return _NONSPEECH.sub("", text).strip(), _last_lang
+    return _NONSPEECH.sub("", text).strip(), detected or lang or None
+
+
+def _rms(frame: np.ndarray) -> float:
+    """Loudness of one int16 frame, as amplitude rather than power."""
+    a = frame.astype(np.float32)
+    return float(np.sqrt(np.mean(a * a))) if a.size else 0.0
+
+
+def speech_is_audible(mean_speech_rms: float) -> bool:
+    """True when captured "speech" is loud enough to be real, not room hum.
+
+    VAD answers "is this shaped like speech", and a fan, a music bed, or
+    the tail of a TV clip all pass that test; whisper then transcribes
+    the noise into invented sentences ("Thanks for watching!"). This is
+    the loudness test VAD does not make. Hands-free only -- the
+    hold-to-talk path records exactly what the person chose to record and
+    is never gated. A floor of 0 disables it.
+    """
+    floor = float(CFG.get("stt_min_rms", MIN_SPEECH_RMS) or 0)
+    return floor <= 0 or mean_speech_rms >= floor
 
 
 class Ears:
@@ -530,6 +524,7 @@ class Ears:
         speech_run = 0
         silence_run = 0
         speech_total = 0
+        speech_rms_sum = 0.0
         in_utterance = False
         elapsed = 0.0
 
@@ -560,17 +555,26 @@ class Ears:
                     frames.append(mono)
                     if is_speech:
                         speech_total += 1
+                        speech_rms_sum += _rms(mono)
                         silence_run = 0
                     else:
                         silence_run += 1
                     if silence_run >= self.silence_frames or \
                        len(frames) * FRAME_MS / 1000 > MAX_UTTER_S:
-                        if speech_total < 8:
-                            # <240ms of actual speech: a noise blip, not
-                            # a sentence — keep listening
+                        mean_rms = speech_rms_sum / speech_total \
+                            if speech_total else 0.0
+                        if speech_total < 8 or not speech_is_audible(mean_rms):
+                            # Too little speech, or too quiet to be a
+                            # person: a noise blip, not a sentence. Keep
+                            # listening rather than hand it to whisper,
+                            # which would invent words over the hum.
+                            if speech_total >= 8:
+                                log(f"[ears] dropped a {mean_rms:.0f}-rms "
+                                    f"blip as room noise")
                             in_utterance = False
                             frames, ring = [], []
                             speech_run = speech_total = 0
+                            speech_rms_sum = 0.0
                             continue
                         return transcribe(np.concatenate(frames))
 
@@ -593,11 +597,6 @@ class Ears:
             # log, so a session can teach the phrase variants with real
             # data instead of guesses.
             log(f"[ears] heard {text!r} - no wake phrase match")
-
-
-def last_language() -> str | None:
-    """Whisper's code for the language spoken most recently, or None."""
-    return _last_lang
 
 
 def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25,

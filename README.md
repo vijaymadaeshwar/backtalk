@@ -72,6 +72,23 @@ Mind ([ai-memory-vault](https://github.com/jaredrhod/ai-memory-vault)), mouth (t
 - **Pin the microphone if you wear a headset.** By default it records from the system default input, which the OS hands to a headset the moment one connects, taking your voice down the narrowband call profile and degrading what you hear at the same time. Set `"mic_device"` in backtalk.json to the input you want, by name (`"MacBook Pro Microphone"`), and the mic stays put whatever connects for output. A name that matches nothing falls back to the default with a log line rather than going mute. (Credit where due: this grew out of a proposal by MacphersonDesigns.)
 - Something misbehaving? `TROUBLESHOOTING.md` covers the classics, and `logs/backtalk.log` has the receipts.
 
+## Developing
+
+backtalk has no pytest; each test is a standalone script. One command runs
+them all, and a couple more run the gates:
+
+```
+uv run python tests/run_all.py          # every suite
+uv run python tests/run_all.py --fast   # skip the model-loading suites (CI)
+uv run ruff check backtalk tests        # lint (error-level rules)
+uv run pyright                          # type gate (basic mode)
+```
+
+`AGENTS.md` is the developer guide: the layout, the invariants that must
+not regress, and how to add a suite. `tests/README.md` lists what each
+suite proves. GitHub Actions (`.github/workflows/ci.yml`) runs the lint,
+type, and fast suites on every push.
+
 ## Credits
 
 Speech recognition by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT) running [OpenAI Whisper](https://github.com/openai/whisper) models (MIT). Voice by [Kokoro](https://github.com/hexgrad/kokoro) (Apache 2.0) with [espeak-ng](https://github.com/espeak-ng/espeak-ng) (GPL-3.0, used as a system tool) for phonemization. Built on the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview).

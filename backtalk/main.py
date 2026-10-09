@@ -512,14 +512,14 @@ def _typed_reader(q: "queue.Queue[str]"):
     except ImportError:            # Windows: no termios — simple reader
         _typed_reader_simple(q)
         return
-    old = termios.tcgetattr(fd)
-    _tty.setcbreak(fd)                      # ECHO+ICANON off, ISIG kept
+    old = termios.tcgetattr(fd)              # pyright: ignore[reportAttributeAccessIssue]
+    _tty.setcbreak(fd)                       # pyright: ignore[reportAttributeAccessIssue]
     sys.stdout.write("\x1b[?2004h")         # bracket pastes, please
     sys.stdout.flush()
 
     def _restore():
         try:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)  # pyright: ignore[reportAttributeAccessIssue]
         except Exception:
             pass
         sys.stdout.write("\x1b[?2004l")

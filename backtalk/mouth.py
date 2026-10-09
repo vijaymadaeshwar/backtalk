@@ -244,6 +244,9 @@ def _stream_espeak(text: str, lang: str | None):
     voice = espeak_voice_for(lang)
     if not (voice and text.strip()):
         return
+    espeak = _ESPEAK
+    if not espeak:
+        return
     fd, path = tempfile.mkstemp(suffix=".txt", prefix="bt-espeak-")
     try:
         # os.fdopen is inside the try on purpose: if it itself raises, the
@@ -256,7 +259,7 @@ def _stream_espeak(text: str, lang: str | None):
             rate = 1.0
         wpm = int(160 / max(rate, 0.5))
         proc = subprocess.run(
-            [_ESPEAK, "-v", voice, "-s", str(wpm), "-f", path, "--stdout"],
+            [espeak, "-v", voice, "-s", str(wpm), "-f", path, "--stdout"],
             capture_output=True, timeout=60)
         if not proc.stdout:
             return
@@ -316,6 +319,8 @@ def _stream_kokoro(text: str):
     """One sentence -> int16 PCM chunks at 24kHz, in-process."""
     voice = warm(_turn_lang())
     pipe = _pipe
+    if pipe is None:
+        return
     try:
         speed = float(CFG.get("speed") or 1.0)
     except (TypeError, ValueError):
@@ -352,6 +357,10 @@ def _stream_elevenlabs(text: str, timeout: float):
          "-af", el["master"],
          "-f", "s16le", "-ar", str(EL_RATE), "-ac", "1", "pipe:1"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    stdin = proc.stdin
+    stdout = proc.stdout
+    if stdin is None or stdout is None:   # impossible with PIPE; narrows
+        return
 
     feed_error: list = []
 
@@ -365,12 +374,12 @@ def _stream_elevenlabs(text: str, timeout: float):
                               timeout=timeout) as r:
                 r.raise_for_status()
                 for chunk in r.iter_bytes(chunk_size=4096):
-                    proc.stdin.write(chunk)
+                    stdin.write(chunk)
         except Exception as e:
             feed_error.append(e)
         finally:
             try:
-                proc.stdin.close()
+                stdin.close()
             except Exception:
                 pass
 
@@ -379,7 +388,7 @@ def _stream_elevenlabs(text: str, timeout: float):
     carry = b""
     got_audio = False
     while True:
-        data = proc.stdout.read(8820)
+        data = stdout.read(8820)
         if not data:
             break
         data = carry + data
@@ -603,10 +612,13 @@ class Mouth:
         re-triggers the onset blip on latch-happy audio setups). Cost:
         the device buffer (~0.1s) plays out after the kill order — half a
         syllable of tail."""
+        out = self._out
+        if out is None:
+            return
         try:
             zeros = np.zeros(2205, dtype=np.int16)
             for _ in range(3):
-                self._out.write(zeros)
+                out.write(zeros)
         except Exception:
             self._drop_out()
 

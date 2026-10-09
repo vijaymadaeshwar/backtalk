@@ -53,6 +53,8 @@ def _spotify_volume() -> int | None:
     if _osa('application "Spotify" is running') != "true":
         return None
     v = _osa('tell application "Spotify" to get sound volume')
+    if v is None:
+        return None
     try:
         return int(v)
     except (TypeError, ValueError):

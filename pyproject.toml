@@ -45,6 +45,7 @@ package = false
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.390",
     "ruff>=0.16.10",
 ]
 
@@ -68,4 +69,19 @@ select = [
     "F822",   # undefined name in __all__
     "F823",   # local variable referenced before assignment
 ]
+
+# The type gate. Basic mode, not strict: this code leans on duck-typed
+# audio/ML libraries and would drown in strict-mode noise. The point is
+# to catch the mistakes a linter cannot -- a wrong attribute, a None that
+# is not checked, a return that can miss a path.
+# Run: uv run pyright
+[tool.pyright]
+include = ["backtalk"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+# sounddevice, webrtcvad, faster-whisper and kokoro ship no type
+# information. That is not a mistake in our code, so a missing stub is
+# not a gate failure -- but a real error in OUR code still is.
+reportMissingTypeStubs = false
+reportMissingModuleSource = false
 
