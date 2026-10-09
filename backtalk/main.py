@@ -1106,7 +1106,14 @@ async def amain():
         # in "open" mode; a mode switch bumps _MIC["gen"], the abort
         # callable closes the in-flight open mic promptly, and any
         # capture born under an old gen is discarded unprocessed.
-        ptt = PTTListener(CFG["ptt_key"])
+        try:
+            ptt = PTTListener(CFG["ptt_key"])
+        except RuntimeError as e:
+            # No global key hook (headless box, or CI). Hold-to-talk is
+            # out; fall back to the open mic so the voice line still runs.
+            log(f"[ptt] {e} — listening with the open mic instead")
+            ptt = None
+            _MIC["mode"] = "open"
         press_fut: asyncio.Future | None = None
         mic_fut: asyncio.Future | None = None
         mic_gen_seen = _MIC["gen"]
@@ -1145,9 +1152,11 @@ async def amain():
                     mic_fut.result(); mic_fut = None
             if typed_fut is None:
                 typed_fut = loop.run_in_executor(_BLOCKERS, typed_q.get)
-            if press_fut is None:
+            if press_fut is None and ptt is not None:
                 press_fut = loop.run_in_executor(_BLOCKERS, ptt.wait_press)
-            waiters = {press_fut, typed_fut}
+            waiters = {typed_fut}
+            if press_fut is not None:
+                waiters.add(press_fut)
             if _MIC["mode"] == "open":
                 if mic_fut is None:
                     g = _MIC["gen"]
@@ -1186,8 +1195,10 @@ async def amain():
                 if text and not await handle(text):
                     return
                 continue
-            if press_fut in done:
+            if press_fut is not None and press_fut in done:
                 press_fut.result(); press_fut = None
+                if ptt is None:          # unreachable: a press needs a key hook
+                    continue
                 press_t = time.monotonic()
                 perm_wait = (_PERM["fut"] is not None
                              and not _PERM["fut"].done())

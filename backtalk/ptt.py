@@ -45,13 +45,29 @@ group or an X11 session.
 """
 import threading
 import time
+from typing import Any
 
-from pynput import keyboard
+# pynput needs a real desktop session to hook a global key. On a headless
+# box (a server, or CI) its import raises "failed to acquire X connection",
+# which would otherwise take the whole voice line down at import time --
+# `from backtalk import main` alone would die. Hook-to-talk is optional;
+# the open mic is not, so a missing backend is recorded and only bites
+# when someone actually asks for a key listener.
+try:
+    from pynput import keyboard as _pynput_keyboard
+    _PTT_ERROR: Exception | None = None
+except Exception as _exc:          # any import-time failure means no hook
+    _pynput_keyboard = None
+    _PTT_ERROR = _exc
+
+keyboard: Any = _pynput_keyboard
 
 
 def resolve_key(name: str):
     """'home' / 'f13' / 'right_alt' / any single character -> pynput key."""
     name = (name or "home").strip().lower()
+    if keyboard is None:
+        return name                    # no backend; PTTListener will refuse
     if len(name) == 1:
         return keyboard.KeyCode.from_char(name)
     # Friendly names -> pynput's names. pynput calls the right option key
@@ -82,6 +98,11 @@ class PTTListener:
     RELEASE_GRACE = 0.12
 
     def __init__(self, key="home"):
+        if keyboard is None:
+            raise RuntimeError(
+                "hold-to-talk needs a desktop session, but the keyboard "
+                f"backend would not start ({_PTT_ERROR}). Use the open "
+                "microphone (\"Hey Seyon\") instead.")
         self._key = resolve_key(key) if isinstance(key, str) else key
         self._held = False
         self._release_t = None          # a release awaiting confirmation
