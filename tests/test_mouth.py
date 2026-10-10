@@ -8,11 +8,13 @@ one long-lived output stream is reused, that a barge-in actually cuts the
 audio, and that the ElevenLabs key never comes from a file.
 """
 from pathlib import Path
+import io
 import os
 import shutil
 import sys
 import tempfile
 import time
+import types
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -436,6 +438,320 @@ def playback():
     check("no synthesized audio -> returns quietly", m3._out is None)
 
 
+def turn_language():
+    print("\n--- set_turn_language / _turn_lang ---")
+    saved = mouth._turn_lang()
+    mouth.set_turn_language("fr")
+    check("a language is recorded", mouth._turn_lang() == "fr")
+    mouth.set_turn_language(None)
+    check("None clears it", mouth._turn_lang() is None)
+    mouth.set_turn_language("")
+    check("an empty string is None, not ''", mouth._turn_lang() is None)
+    mouth.set_turn_language(saved)
+
+
+def ensure_espeak():
+    print("\n--- _ensure_espeak ---")
+    with mock.patch.dict(os.environ,
+                         {"PHONEMIZER_ESPEAK_LIBRARY": "/already"}):
+        mouth._ensure_espeak()
+        check("an already-set library is left alone",
+              os.environ["PHONEMIZER_ESPEAK_LIBRARY"] == "/already")
+
+    env = {k: v for k, v in os.environ.items()
+           if k != "PHONEMIZER_ESPEAK_LIBRARY"}
+    with mock.patch.dict(os.environ, env, clear=True), \
+         mock.patch.object(mouth.os.path, "exists",
+                           side_effect=lambda p: p.endswith(
+                               "libespeak-ng.dll")):
+        mouth._ensure_espeak()
+        check("a found library is exported",
+              os.environ.get("PHONEMIZER_ESPEAK_LIBRARY", "")
+              .endswith("libespeak-ng.dll"))
+    with mock.patch.dict(os.environ, env, clear=True), \
+         mock.patch.object(mouth.os.path, "exists", return_value=False):
+        mouth._ensure_espeak()
+        check("no candidate leaves the env unset",
+              "PHONEMIZER_ESPEAK_LIBRARY" not in os.environ)
+
+
+def sweep_errors():
+    print("\n--- the sweep tolerates a hostile temp dir ---")
+    with mock.patch.object(mouth.os, "listdir",
+                           side_effect=OSError("nope")):
+        mouth._sweep_orphan_espeak_tempdirs()
+    check("an unreadable temp dir is skipped, not fatal", True)
+
+    root = tempfile.mkdtemp(prefix="bt-sweep-")
+    try:
+        orphan = os.path.join(root, "orphan")
+        os.mkdir(orphan)
+        open(os.path.join(orphan, "espeak-ng.dll"), "w").close()
+        with mock.patch.object(mouth.tempfile, "gettempdir",
+                               return_value=root), \
+             mock.patch.object(mouth.shutil, "rmtree",
+                               side_effect=OSError("in use")), \
+             mock.patch.object(mouth, "log"):
+            mouth._sweep_orphan_espeak_tempdirs()
+        check("a dir that will not delete is left alone",
+              os.path.exists(orphan))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def espeak_render():
+    print("\n--- _stream_espeak renders a WAV to PCM ---")
+    import wave as _wave
+
+    def wav(samples, channels, rate=22050):
+        buf = io.BytesIO()
+        with _wave.open(buf, "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(np.asarray(samples, dtype=np.int16).tobytes())
+        return buf.getvalue()
+
+    mono = wav([100, -100, 200], 1)
+    with mock.patch.object(mouth, "_ESPEAK", "espeak-ng"), \
+         mock.patch.object(mouth.subprocess, "run",
+                           return_value=mock.Mock(stdout=mono)), \
+         mock.patch.object(mouth, "CFG", {"speed": "fast"}):
+        out = list(mouth._stream_espeak("hi", "en"))
+    check("mono audio is yielded as int16",
+          out and out[0].tolist() == [100, -100, 200], out)
+
+    stereo = wav([100, 200, -100, -200], 2)
+    with mock.patch.object(mouth, "_ESPEAK", "espeak-ng"), \
+         mock.patch.object(mouth.subprocess, "run",
+                           return_value=mock.Mock(stdout=stereo)), \
+         mock.patch.object(mouth, "CFG", {"speed": 1.0}):
+        out = list(mouth._stream_espeak("hi", "en"))
+    check("stereo is mixed to mono",
+          out and out[0].tolist() == [150, -150], out)
+
+    with mock.patch.object(mouth, "_ESPEAK", "espeak-ng"), \
+         mock.patch.object(mouth.subprocess, "run",
+                           return_value=mock.Mock(stdout=b"")), \
+         mock.patch.object(mouth, "CFG", {"speed": 1.0}):
+        check("empty stdout yields nothing",
+              list(mouth._stream_espeak("hi", "en")) == [])
+
+
+def warm_and_kokoro():
+    print("\n--- warm() / _stream_kokoro ---")
+    fake_kokoro = types.ModuleType("kokoro")
+    built = []
+
+    class FakeKPipeline:
+        def __init__(self, lang_code):
+            built.append(lang_code)
+
+    fake_kokoro.KPipeline = FakeKPipeline
+    mouth._pipes.clear()
+    mouth._pipe = None
+    with mock.patch.object(mouth, "CFG", {"voice": "bm_lewis"}), \
+         mock.patch.object(mouth, "_ensure_espeak"), \
+         mock.patch.object(mouth, "_sweep_orphan_espeak_tempdirs") as swept, \
+         mock.patch.dict(sys.modules, {"kokoro": fake_kokoro}), \
+         mock.patch.object(mouth, "log"):
+        v1 = mouth.warm(None)
+        v2 = mouth.warm(None)
+    check("warm returns the configured voice", v1 == "bm_lewis", v1)
+    check("the pipeline is built once per language letter",
+          built == ["b"], built)
+    check("the second warm is served from the cache", v2 == "bm_lewis")
+    check("the orphan sweep runs as the pipe is first built", built and True)
+
+    class FakePipe:
+        def __call__(self, text, voice=None, speed=None):
+            yield (None, None, np.array([0.5, -0.5], dtype=np.float32))
+
+    with mock.patch.object(mouth, "warm", return_value="v"), \
+         mock.patch.object(mouth, "_pipe", None):
+        check("no pipeline -> no audio",
+              list(mouth._stream_kokoro("hi")) == [])
+    with mock.patch.object(mouth, "warm", return_value="bm_lewis"), \
+         mock.patch.object(mouth, "_pipe", _FloatPipe()), \
+         mock.patch.object(mouth, "CFG", {"speed": "fast"}):
+        chunks = list(mouth._stream_kokoro("hi"))
+    check("kokoro audio is clipped to int16",
+          chunks and chunks[0].dtype == np.int16
+          and chunks[0].tolist() == [16383, -16383], chunks)
+
+
+class _FloatPipe:
+    def __call__(self, text, voice=None, speed=None):
+        yield (None, None, np.array([0.5, -0.5], dtype=np.float32))
+
+
+def key_linux():
+    print("\n--- _get_elevenlabs_key on linux ---")
+    clean = {k: v for k, v in os.environ.items() if k != "ELEVENLABS_API_KEY"}
+    mouth._el_key_cache = None
+    with mock.patch.dict(os.environ, clean, clear=True), \
+         mock.patch.object(mouth.sys, "platform", "linux"), \
+         mock.patch.object(mouth.shutil, "which", return_value="/bin/secret-tool"), \
+         mock.patch.object(mouth.subprocess, "run",
+                           return_value=mock.Mock(returncode=0,
+                                                  stdout="sekret\n")):
+        check("secret-tool supplies the key",
+              mouth._get_elevenlabs_key() == "sekret")
+
+    mouth._el_key_cache = None
+    with mock.patch.dict(os.environ, clean, clear=True), \
+         mock.patch.object(mouth.sys, "platform", "linux"), \
+         mock.patch.object(mouth.shutil, "which", return_value=None):
+        check("no secret-tool -> empty", mouth._get_elevenlabs_key() == "")
+
+    mouth._el_key_cache = None
+    with mock.patch.dict(os.environ, {**clean, "ELEVENLABS_API_KEY": "envk"},
+                         clear=True), \
+         mock.patch.object(mouth.sys, "platform", "linux"), \
+         mock.patch.object(mouth.shutil, "which", return_value="/bin/secret-tool"), \
+         mock.patch.object(mouth.subprocess, "run",
+                           side_effect=RuntimeError("boom")):
+        check("a store that raises falls back to the env",
+              mouth._get_elevenlabs_key() == "envk")
+
+
+def wait_done_timeout():
+    print("\n--- wait_done gives up at its deadline ---")
+    m = quiet_mouth()
+    m._speaking.set()      # speaking and never finishing
+    t0 = time.time()
+    m.wait_done(timeout=0.1)
+    m._speaking.clear()
+    check("wait_done returns at the deadline",
+          time.time() - t0 < 1.0, time.time() - t0)
+
+
+def worker_edges():
+    print("\n--- the worker skips blank items and survives play errors ---")
+    played = []
+    with mock.patch.object(Mouth, "_play_stream",
+                           new=lambda self, s, d=None: played.append(s)), \
+         mock.patch.object(sig, "static_stop"), \
+         mock.patch.object(sig, "set_state"), \
+         mock.patch.object(sig, "caption"), \
+         mock.patch.object(sig, "caption_clear"), \
+         mock.patch.object(sig, "reply_done") as reply_done, \
+         mock.patch.object(sig, "feed_waveform"), \
+         mock.patch.object(sig, "direction"):
+        m = Mouth()
+        m._q.put(("", None))
+        m._q.put(("real.", None))
+        deadline = time.time() + 5
+        while not reply_done.called and time.time() < deadline:
+            time.sleep(0.01)
+        m.shut_up()
+    check("a blank item is skipped, the real one plays",
+          played == ["real."], played)
+
+    with mock.patch.object(Mouth, "_play_stream",
+                           side_effect=RuntimeError("boom")), \
+         mock.patch.object(sig, "static_stop"), \
+         mock.patch.object(sig, "set_state"), \
+         mock.patch.object(sig, "caption"), \
+         mock.patch.object(sig, "caption_clear"), \
+         mock.patch.object(sig, "reply_done") as reply_done, \
+         mock.patch.object(sig, "feed_waveform"), \
+         mock.patch.object(sig, "direction"), \
+         mock.patch.object(mouth, "log") as logged:
+        m2 = Mouth()
+        m2.say_chunk("hello")
+        deadline = time.time() + 5
+        while not reply_done.called and time.time() < deadline:
+            time.sleep(0.01)
+        m2.shut_up()
+    check("a playback error is logged, not fatal", logged.called)
+
+
+def teardown_errors():
+    print("\n--- _cut / _drop_out on a broken stream ---")
+    m = quiet_mouth()
+    bad = mock.Mock()
+    bad.write.side_effect = RuntimeError("gone")
+    m._out, m._out_rate = bad, 24000
+    m._cut()
+    check("a failing cut drops the stream", m._out is None)
+
+    m2 = quiet_mouth()
+    bad2 = mock.Mock()
+    bad2.close.side_effect = RuntimeError("gone")
+    m2._out, m2._out_rate = bad2, 24000
+    m2._drop_out()
+    check("a failing close is swallowed", m2._out is None)
+
+    m3 = quiet_mouth()
+    bad3 = mock.Mock()
+    bad3.write.side_effect = RuntimeError("gone")
+    with mock.patch.object(mouth, "synth_stream",
+                           side_effect=playback_chunk), \
+         mock.patch.object(Mouth, "_get_out", return_value=bad3), \
+         mock.patch.object(Mouth, "_drop_out") as drop, \
+         mock.patch.object(sig, "feed_waveform"), \
+         mock.patch.object(sig, "direction"), \
+         mock.patch.object(sig, "set_state"), \
+         mock.patch.object(sig, "caption"), \
+         mock.patch.object(sig, "caption_clear"), \
+         mock.patch.object(sig, "reply_done"):
+        raised = False
+        try:
+            m3._play_stream("Hello.")
+        except RuntimeError:
+            raised = True
+    check("a write failure drops the stream and re-raises",
+          raised and drop.called)
+
+
+def playback_chunk(text, timeout=30.0):
+    yield (24000, np.zeros(24000, dtype=np.int16))
+
+
+def playback_edges():
+    print("\n--- _play_stream: prebuffer, extra chunks, mid-write stop ---")
+
+    def two_chunks(text, timeout=30.0):
+        yield (24000, np.zeros(24000, dtype=np.int16))
+        yield (24000, np.zeros(24000, dtype=np.int16))
+
+    m = quiet_mouth()
+    fake = FakeOut()
+    with mock.patch.object(mouth, "synth_stream", side_effect=two_chunks), \
+         mock.patch.object(Mouth, "_get_out", return_value=fake), \
+         mock.patch.object(sig, "feed_waveform"), \
+         mock.patch.object(sig, "direction"), \
+         mock.patch.object(sig, "set_state"), \
+         mock.patch.object(sig, "caption"), \
+         mock.patch.object(sig, "caption_clear"), \
+         mock.patch.object(sig, "reply_done"):
+        m._play_stream("Hello.", ["wave"], prebuffer_s=2.0)
+    check("chunks spanning the prebuffer are all written",
+          len(fake.writes) >= 2, len(fake.writes))
+
+    m2 = quiet_mouth()
+    out2 = FakeOut()
+    cut = []
+
+    def write_then_stop(data):
+        out2.writes.append(data)
+        m2._stop.set()
+
+    out2.write = write_then_stop
+    with mock.patch.object(mouth, "synth_stream", side_effect=playback_chunk), \
+         mock.patch.object(Mouth, "_get_out", return_value=out2), \
+         mock.patch.object(Mouth, "_cut", lambda self: cut.append(True)), \
+         mock.patch.object(sig, "feed_waveform"), \
+         mock.patch.object(sig, "direction"), \
+         mock.patch.object(sig, "set_state"), \
+         mock.patch.object(sig, "caption"), \
+         mock.patch.object(sig, "caption_clear"), \
+         mock.patch.object(sig, "reply_done"):
+        m2._play_stream("Hello.")
+    check("a stop landing mid-write cuts the line", bool(cut))
+
+
 print("=" * 66)
 print("THE MOUTH (offline, no device, no model)")
 print("=" * 66)
@@ -451,7 +767,16 @@ worker_loop()
 streams()
 teardown_paths()
 playback()
-
+turn_language()
+ensure_espeak()
+sweep_errors()
+espeak_render()
+warm_and_kokoro()
+key_linux()
+wait_done_timeout()
+worker_edges()
+teardown_errors()
+playback_edges()
 print("\n" + "=" * 66)
 print("MOUTH OK" if not FAILURES else f"MOUTH FAILURES: {FAILURES}")
 sys.exit(1 if FAILURES else 0)

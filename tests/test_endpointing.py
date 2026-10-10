@@ -144,6 +144,37 @@ def test_duration_gate():
           text == "a sentence" and len(calls) == 1, (text, calls))
 
 
+def test_timeout_without_speech():
+    print("\n--- a timeout with no speech returns None ---")
+    stream = FakeStream([frame(0)])
+    ears._open_mic = lambda: stream
+    ears.transcribe = lambda pcm, gate_no_speech=False: "never"
+    e = Ears(silence_ms=60)
+    e.vad = FakeVad([False])
+    got = e.listen_once(timeout_s=0.01)
+    check("no speech within the window -> None", got is None, got)
+
+
+def test_gate_suppresses_then_opens():
+    print("\n--- the barge-in gate mutes the open mic ---")
+    frames = [frame(0)] * 3 + [frame(3000)] * 12 + [frame(0)] * 2
+    stream = FakeStream(frames)
+    ears._open_mic = lambda: stream
+    ears.transcribe = lambda pcm, gate_no_speech=False: "a sentence"
+    gate_calls = {"n": 0}
+
+    def gate():
+        gate_calls["n"] += 1
+        return gate_calls["n"] <= 3     # speakers talking for the first frames
+
+    e = Ears(silence_ms=60)
+    e.vad = FakeVad([True] * 12 + [False] * 2)  # gated frames skip the VAD
+    text = e.listen_once(gate=gate, timeout_s=5)
+    check("the gate suppresses the mic, then it hears",
+          text == "a sentence", text)
+    check("the gated frames were dropped", gate_calls["n"] >= 3)
+
+
 print("=" * 66)
 print("OPEN-MIC ENDPOINTING")
 print("=" * 66)
@@ -159,6 +190,9 @@ try:
     test_no_speech_gate()
     CFG["stt_min_speech_ms"] = 600   # and the phrase-length floor on
     test_duration_gate()
+    CFG["stt_min_speech_ms"] = 0
+    test_timeout_without_speech()
+    test_gate_suppresses_then_opens()
 finally:
     ears._open_mic, ears.transcribe = saved_mic, saved_transcribe
     CFG["stt_min_speech_ms"] = saved_min

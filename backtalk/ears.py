@@ -171,7 +171,7 @@ def _hf_cache_dir(name: str) -> Path:
                 if ((child / "model.bin").exists()
                         and (child / "config.json").exists()):
                     return child
-    return root / "models--" + repos[0].replace("/", "--")
+    return root / ("models--" + repos[0].replace("/", "--"))
 
 
 def _stt_cached(name: str) -> bool:

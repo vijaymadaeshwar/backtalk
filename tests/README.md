@@ -26,6 +26,7 @@ stack running (brain on 4599, face on 8790).
 | `test_endpointing.py` | The open-mic endpointer opens and closes on schedule, and the hands-free gates (loudness floor, minimum phrase length, and the model's own no-speech score) drop noise before whisper sees it. |
 | `test_ptt.py` | Hold-to-talk timing: the release callback fires before transcription, taps are ignored, the time cap still proceeds. |
 | `test_ptt_headless.py` | A machine with no keyboard backend (CI) still imports `backtalk.main`, and asking for a key listener fails cleanly instead of taking the line down. |
+| `test_ptt_units.py` | ptt.py fully offline with a fake keyboard: key-name resolution (letters, friendly names, options), press/release/repeat, the settle grace window, `wait_press`/`is_held`, and the missing-backend import path. |
 | `test_encoding.py` | Every text file is clean UTF-8: no BOM, no double-encoding. |
 | `test_journal.py` | What the session journal writes, what it refuses to write, and what it does when the brain is slow or broken. |
 | `test_bus_park.py` | The bus is never left saying `speaking` by a voice that is gone. |
@@ -33,6 +34,7 @@ stack running (brain on 4599, face on 8790).
 | `test_live.py` | The live-data path offline: trigger detection, each source's parsing, the news then wikipedia then duckduckgo fallback order, and the cache. |
 | `test_main.py` | main.py's helpers and decisions: console verbs, usage phrasing, paste assembly, the human permission wording, config writes, reply batching, and the spoken permission gate (allow/deny/details/interrupt/timeout). |
 | `test_mouth.py` | mouth.py offline: sentence splitting, the elevenlabs then kokoro then espeak fallback chain, the one long-lived output stream, barge-in cutting, the credential lookup, and orphan temp-dir sweeping. |
+| `test_ears_units.py` | ears.py offline: MLX/GPU detection, model resolution and HF cache paths, mic selection and reopen, the audio-failure explanation, and `transcribe_language` over faked whisper backends. |
 | `test_stt_langs.py` | A real English or Tamil sentence survives the trip through Whisper (heavy). |
 | `test_espeak_fallback.py` | Every reply reaches the one English voice, and espeak-ng carries it when Kokoro cannot (heavy). |
 | `test_e2e.py` | One whole turn: speech -> STT -> brain -> TTS -> caption and language on the bus (live). |
@@ -57,3 +59,9 @@ Worth keeping, because each one looked fine from the outside and was not:
 - `brain.WarmBrain.ask_stream` yields nothing at all unless `start()` has
   run first. An E2E test that skips it reports an empty reply and looks
   like a brain failure rather than a harness mistake.
+- `ears._hf_cache_dir` built its path as
+  `root / "models--" + name.replace("/", "--")`. Python parses `/` before
+  `+`, so the `str` on the left raised `TypeError` on **every** platform
+  whenever a preferred model was not already downloaded -- the fallback to
+  a cached model died before it could run. Parenthesised now, and the
+  offline unit test walks both the flat and the snapshot cache layouts.

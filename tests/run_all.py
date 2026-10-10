@@ -25,14 +25,14 @@ HEAVY = {"test_stt_langs.py", "test_espeak_fallback.py"}
 # Suites that need the live stack running. Opt in with --all.
 LIVE = {"test_e2e.py", "test_live_path.py"}
 # The coverage floor the fast suites must clear. The number is what the
-# offline suites actually reach for backtalk/ (measured 60% in late 2026);
+# offline suites actually reach for backtalk/ (measured 71% in late 2026);
 # it is a ratchet, not a target. The uncovered remainder is what a fast,
-# headless run cannot reach: real audio playback (mouth's synth/play
-# paths), the live event loop and the POSIX tty reader (main.amain,
-# _typed_reader), the whisper model and microphone (ears), and the
-# keychain/secret-tool lookups. Raise this whenever the real number rises
-# -- never lower it to pass.
-COVERAGE_FLOOR = 58
+# headless run cannot reach: the live event loop and the POSIX tty reader
+# (main.amain, _typed_reader), the whisper model and microphone (ears),
+# the real audio sinks (mouth's kokoro/elevenlabs streaming), the brain's
+# provider glue, and the keychain/secret-tool lookups. Raise this whenever
+# the real number rises -- never lower it to pass.
+COVERAGE_FLOOR = 69
 
 
 def discover(fast: bool, every: bool) -> list[str]:
