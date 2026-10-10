@@ -903,6 +903,22 @@ class _StaleCaptureEars(_LoopEars):
         return None
 
 
+class _InstantEars(_LoopEars):
+    """A capture that resolves the instant it is asked."""
+
+    def listen_once(self, gate=None, abort=None):
+        self.calls += 1
+        return None
+
+
+class _YieldingBrain(_LoopBrain):
+    """A brain whose turn reset yields, opening a window for a press and
+    a capture to land mid-command (i.e. under the mode being switched)."""
+
+    async def reset_turn(self):
+        await asyncio.sleep(0.1)
+
+
 class _KbBrain(_LoopBrain):
     """A command that raises KeyboardInterrupt out of the turn loop."""
 
@@ -1272,6 +1288,14 @@ def amain_loop():
         ptt=_TimedPress(0.6), record=rec_quit)
     check("a capture born before a mode switch is discarded unprocessed",
           res_st["exit"] is None and not res_st["timeout"], res_st)
+
+    _, _, res_mg = _run_amain(
+        ["push to talk mode", "goodbye seyon"],
+        cfg_extra={"mic_mode": "open"}, ears=_InstantEars(),
+        ptt=_TimedPress(0.02), record=_noop_record,
+        brain_cls=_YieldingBrain)
+    check("a press and a capture that finished under the old mode are eaten",
+          res_mg["exit"] is None and not res_mg["timeout"], res_mg)
 
 
 def tty_reader():
