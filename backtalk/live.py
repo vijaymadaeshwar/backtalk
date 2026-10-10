@@ -88,7 +88,15 @@ def _news() -> str:
 
 def _search(url: str, pattern: str) -> str:
     raw = _get(url)
-    hits = [_clean(h) for h in re.findall(pattern, raw, re.DOTALL)]
+    hits = []
+    for h in re.findall(pattern, raw, re.DOTALL):
+        # A pattern with an alternation of groups returns a tuple per match,
+        # one entry per group and empty for the ones that did not fire. Take
+        # the group that actually matched rather than handing the tuple to
+        # _clean (which raises on a non-string and silently loses every hit).
+        if isinstance(h, tuple):
+            h = next((g for g in h if g), "")
+        hits.append(_clean(h))
     hits = [h for h in hits if 8 < len(h) < 400]
     if not hits:
         return ""

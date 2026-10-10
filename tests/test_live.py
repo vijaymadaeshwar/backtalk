@@ -39,6 +39,12 @@ DDG_HTML = (
     "A second pretty long result line</a>\n"
     "<span>something much too short</span>")
 
+DDG_SQ = ('<a class="result-link" href="#">'
+          "A quote-styled result line here</a>")
+
+DDG_PATTERN = (r'<a[^>]*class="result-link"[^>]*>(.*?)</a>'
+               r"|result-link[^>]*>(.*?)</a>")
+
 WIKI_JSON = (
     '{"query": {"search": ['
     '{"title": "Bitcoin", "snippet": "<b>Bitcoin</b> is a currency"},'
@@ -93,6 +99,17 @@ def search():
     with mock.patch.object(live, "_get", return_value="<p>nothing</p>"):
         check("no hits -> empty",
               live._search("http://x", r"<h1>(.*?)</h1>") == "")
+    # The pattern fetch actually uses has two groups, so findall yields a
+    # tuple per match. This used to hand the tuple to _clean and lose every
+    # hit; the flattening in _search is what this pins.
+    with mock.patch.object(live, "_get", return_value=DDG_HTML):
+        out = live._search("http://x", DDG_PATTERN)
+    check("the real two-group pattern keeps its hits",
+          "A first pretty long result line" in out, out)
+    with mock.patch.object(live, "_get", return_value=DDG_SQ):
+        out = live._search("http://x", DDG_PATTERN)
+    check("the second alternation group is used when the first misses",
+          "A quote-styled result line here" in out, out)
 
 
 def wikipedia():
@@ -135,6 +152,13 @@ def fetch_branches():
          mock.patch.object(live, "_wikipedia", return_value=""), \
          mock.patch.object(live, "_search", return_value=""):
         check("all sources empty -> empty", live.fetch("what's today") == "")
+
+    live._cache.clear()
+    with mock.patch.object(live, "_get", return_value=DDG_HTML):
+        out = live.fetch("current share price of acme")
+    check("the duckduckgo path works end to end",
+          "from DuckDuckGo" in out and "first pretty long result" in out,
+          out[:120])
 
     live._cache.clear()
     with mock.patch.object(live, "_news", return_value=""), \
