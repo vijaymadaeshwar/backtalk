@@ -128,6 +128,23 @@ def wait_press_and_is_held():
         lis._release_t -= (ptt.PTTListener.RELEASE_GRACE + 1)
         check("is_held settles a stale release", lis.is_held() is False)
 
+        class FlakyEvent:
+            def __init__(self):
+                self.n = 0
+
+            def wait(self, timeout=None):
+                self.n += 1
+                return self.n >= 2
+
+            def clear(self):
+                pass
+
+        lis2 = ptt.PTTListener("home")
+        lis2._press_evt = FlakyEvent()
+        lis2.wait_press()
+        check("wait_press rides out a timeout and returns on the press",
+              lis2._press_evt.n == 2, lis2._press_evt.n)
+
 
 def no_backend_branch():
     print("\n--- the module survives a missing keyboard backend ---")

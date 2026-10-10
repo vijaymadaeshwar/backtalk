@@ -48,6 +48,10 @@ def test_write_contents():
         j.say_agent("Opening it now.")
         j.say_user("thanks")
         j.say_agent("Any time.")
+        check("transcript pairs both sides",
+              j.transcript()
+              == "you: open notepad\nseyon: Opening it now.\n"
+                 "you: thanks\nseyon: Any time.")
         path = j.write("We opened Notepad.")
         if not check("wrote a file", path is not None):
             return

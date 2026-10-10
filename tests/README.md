@@ -33,10 +33,10 @@ stack running (brain on 4599, face on 8790).
 | `test_config.py` | config.load: the merge over defaults, the file wounds it forgives (missing, BOM, invalid JSON), the derived paths and placeholders, `visible_skills` being named as a no-op, the open-mic greeting swap, `discipline_append`, and `refresh_clock`. |
 | `test_bus_park.py` | The bus is never left saying `speaking` by a voice that is gone. |
 | `test_turn_errors.py` | A failed turn always parks the bus and tells the listener. |
-| `test_live.py` | The live-data path offline: trigger detection, each source's parsing, the news then wikipedia then duckduckgo fallback order, and the cache. |
+| `test_live.py` | The live-data path offline: trigger detection, the `_get` network call with its UA and timeout, each source's parsing, the news then wikipedia then duckduckgo fallback order (including a feed that raises), and the cache. |
 | `test_main.py` | main.py's helpers and decisions, plus the whole `amain()` live loop driven over fakes (typed turns, console verbs, live mic switches, brain-connect failure, the permission answer, the key, and the open-mic fallbacks), the POSIX tty line editor, and the `main()` process boundary: console verbs, usage phrasing, paste assembly, the human permission wording, config writes, reply batching, and the spoken permission gate (allow/deny/details/interrupt/timeout). |
 | `test_mouth.py` | mouth.py offline: sentence splitting, the elevenlabs then kokoro then espeak fallback chain, the elevenlabs fetch/decode/feed plumbing, the one long-lived output stream, barge-in cutting, the queue drain, the credential lookup, and orphan temp-dir sweeping. |
-| `test_ears_units.py` | ears.py offline: MLX/GPU detection, model resolution and HF cache paths, mic selection and reopen, the audio-failure explanation, and `transcribe_language` over faked whisper backends. |
+| `test_ears_units.py` | ears.py offline: MLX/GPU detection, model resolution and HF cache paths, mic selection and reopen, the audio-failure explanation, `warm()` on both backends (device-probe fallback and the CPU re-raise), the `wait_for_wake` loop, and `transcribe_language` over faked whisper backends. |
 | `test_stt_langs.py` | A real English or Tamil sentence survives the trip through Whisper (heavy). |
 | `test_espeak_fallback.py` | Every reply reaches the one English voice, and espeak-ng carries it when Kokoro cannot (heavy). |
 | `test_e2e.py` | One whole turn: speech -> STT -> brain -> TTS -> caption and language on the bus (live). |

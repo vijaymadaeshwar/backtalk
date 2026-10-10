@@ -98,6 +98,15 @@ def model_resolution():
             check("a snapshot layout is found too",
                   ears._hf_cache_dir("medium") == snap)
 
+        bad = (Path(tmp) / "models--Systran--faster-whisper-base"
+               / "snapshots" / "bad")
+        bad.mkdir(parents=True)
+        (bad / "model.bin").write_text("x")
+        with mock.patch.object(ears.os.path, "expanduser", return_value=tmp):
+            check("a snapshot missing its config is skipped",
+                  ears._hf_cache_dir("base")
+                  == Path(tmp) / "models--Systran--faster-whisper-base")
+
     with tempfile.TemporaryDirectory() as tmp:
         flat = (Path(tmp) / "models--Systran--faster-whisper-small")
         flat.mkdir(parents=True)
@@ -141,6 +150,7 @@ def mic_index():
         check("an absent name falls to the default",
               ears._mic_index() is None)
         check("and says so once", logged.called)
+        check("a second press stays quiet", ears._mic_index() is None)
     ears._mic_device_warned = False
     with mock.patch.object(ears, "CFG", {"mic_device": "Mic"}), \
          mock.patch.object(ears.sd, "query_devices",
@@ -322,7 +332,7 @@ def transcribe_path():
 
     def mlx_transcribe(audio, **kw):
         return {"text": " Hi there. ", "language": "en",
-                "segments": [{"no_speech_prob": 0.3}]}
+                "segments": [{"no_speech_prob": 0.3}, {}]}
 
     fake_mlx.transcribe = mlx_transcribe
     with mock.patch.object(ears, "warm", return_value="repo"), \
@@ -336,6 +346,14 @@ def transcribe_path():
     check("and its language", lang == "en", lang)
     check("and its no-speech score",
           ears._LAST_NO_SPEECH == 0.3, ears._LAST_NO_SPEECH)
+
+    with mock.patch.object(ears, "warm", return_value=GoodModel()), \
+         mock.patch.object(ears, "_backend", "faster-whisper"), \
+         mock.patch.object(ears, "_stt", return_value="small.en"), \
+         mock.patch.object(ears, "CFG", {"stt_language": "",
+                                         "stt_prompt": ""}):
+        check("transcribe is the text half of transcribe_language",
+              ears.transcribe(pcm) == "Hello world.")
 
 
 def gates():
@@ -369,6 +387,132 @@ def gates():
               ears._min_speech_frames() == 8)
 
 
+def warm_path():
+    print("\n--- warm ---")
+    with mock.patch.object(ears, "check_microphone"), \
+         mock.patch.object(ears, "_apple_gpu_available", return_value=False), \
+         mock.patch.object(ears, "_stt", return_value="small.en"), \
+         mock.patch.object(ears, "CFG",
+                           {"stt_device": "cpu", "stt_compute": "int8"}), \
+         mock.patch.object(ears, "_probe") as probe, \
+         mock.patch.object(ears, "log"), \
+         mock.patch.object(ears, "_model", None), \
+         mock.patch.object(ears, "_backend", None):
+        made = []
+
+        def factory(_model, device, compute_type):
+            made.append(device)
+            return object()
+
+        fake_fw = types.ModuleType("faster_whisper")
+        fake_fw.WhisperModel = factory
+        with mock.patch.dict(sys.modules, {"faster_whisper": fake_fw}):
+            model = ears.warm()
+            check("warm builds the faster-whisper model", model is not None)
+            check("on the configured device", made == ["cpu"], made)
+            check("and probes it before reporting ready", probe.called)
+            check("and records the backend",
+                  ears._backend == "faster-whisper", ears._backend)
+
+    with mock.patch.object(ears, "check_microphone"), \
+         mock.patch.object(ears, "_apple_gpu_available", return_value=False), \
+         mock.patch.object(ears, "_stt", return_value="small"), \
+         mock.patch.object(ears, "CFG",
+                           {"stt_device": "cuda", "stt_compute": "float16"}), \
+         mock.patch.object(ears, "log"), \
+         mock.patch.object(ears, "_model", None), \
+         mock.patch.object(ears, "_backend", None):
+        made2 = []
+        calls = {"n": 0}
+
+        def factory2(_model, device, compute_type):
+            made2.append(device)
+            return object()
+
+        def probe_side(_m):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("no cublas")
+
+        fake_fw2 = types.ModuleType("faster_whisper")
+        fake_fw2.WhisperModel = factory2
+        with mock.patch.dict(sys.modules, {"faster_whisper": fake_fw2}), \
+             mock.patch.object(ears, "_probe", side_effect=probe_side):
+            ears.warm()
+            check("a device that fails its probe falls to the CPU",
+                  made2 == ["cuda", "cpu"], made2)
+
+    with mock.patch.object(ears, "check_microphone"), \
+         mock.patch.object(ears, "_apple_gpu_available", return_value=False), \
+         mock.patch.object(ears, "_stt", return_value="small"), \
+         mock.patch.object(ears, "CFG",
+                           {"stt_device": "cpu", "stt_compute": "int8"}), \
+         mock.patch.object(ears, "log"), \
+         mock.patch.object(ears, "_model", None):
+        fake_fw3 = types.ModuleType("faster_whisper")
+        fake_fw3.WhisperModel = lambda *a, **k: object()
+        raised = False
+        with mock.patch.dict(sys.modules, {"faster_whisper": fake_fw3}), \
+             mock.patch.object(ears, "_probe",
+                               side_effect=RuntimeError("dead")):
+            try:
+                ears.warm()
+            except RuntimeError:
+                raised = True
+        check("a CPU model that will not run raises", raised)
+
+    with mock.patch.object(ears, "check_microphone"), \
+         mock.patch.object(ears, "_apple_gpu_available", return_value=True), \
+         mock.patch.object(ears, "_stt", return_value="small"), \
+         mock.patch.object(ears, "_mlx_repo", return_value="repo"), \
+         mock.patch.object(ears, "log"), \
+         mock.patch.object(ears, "_model", None), \
+         mock.patch.object(ears, "_backend", None):
+        seen = {}
+        fake_mlx = types.ModuleType("mlx_whisper")
+
+        def mlx_tx(audio, path_or_hf_repo=None, language=None, verbose=None):
+            seen["repo"] = path_or_hf_repo
+            return {}
+
+        fake_mlx.transcribe = mlx_tx
+        with mock.patch.dict(sys.modules, {"mlx_whisper": fake_mlx}):
+            model = ears.warm()
+            check("warm loads the MLX repo", model == "repo", model)
+            check("warming on the derived repo",
+                  seen.get("repo") == "repo", seen)
+            check("and records the mlx backend", ears._backend == "mlx")
+
+    with mock.patch.object(ears, "check_microphone"), \
+         mock.patch.object(ears, "_model", "already"):
+        check("an already-warm model is returned as-is",
+              ears.warm() == "already")
+
+
+def wake_loop():
+    print("\n--- Ears.wait_for_wake ---")
+    e = ears.Ears()
+    seq = ["", "hey seyon"]
+    calls = {"n": 0}
+
+    def listen_once(self, gate=None, abort=None):
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i] if i < len(seq) else None
+
+    with mock.patch.object(ears.Ears, "listen_once", new=listen_once):
+        got = e.wait_for_wake(["hey seyon"])
+    check("a blanked clip is skipped, the wake phrase returned",
+          got == "hey seyon", got)
+
+    def listen_none(self, gate=None, abort=None):
+        return None
+
+    with mock.patch.object(ears.Ears, "listen_once", new=listen_none):
+        got = e.wait_for_wake(["hey seyon"])
+    check("an aborted listen ends the wait", got is None)
+
+
 print("=" * 66)
 print("EARS UNITS (offline, no mic, no model)")
 print("=" * 66)
@@ -380,6 +524,8 @@ mic_failure_words()
 probe()
 transcribe_path()
 gates()
+warm_path()
+wake_loop()
 
 print("\n" + "=" * 66)
 print("EARS UNITS OK" if not FAILURES else f"EARS FAILURES: {FAILURES}")

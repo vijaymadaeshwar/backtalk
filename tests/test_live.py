@@ -123,6 +123,29 @@ def wikipedia():
         check("no rows -> empty", live._wikipedia("x") == "")
 
 
+def network():
+    print("\n--- _get: the one real network call ---")
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return "<b>caf\u00e9</b>".encode("utf-8")
+
+    with mock.patch.object(live.urllib.request, "urlopen",
+                           return_value=FakeResponse()) as opened:
+        out = live._get("http://example.test/feed")
+    check("_get reads and decodes the body", out == "<b>caf\u00e9</b>", out)
+    check("_get passes a timeout",
+          opened.call_args.kwargs.get("timeout") == live.TIMEOUT)
+    req = opened.call_args.args[0]
+    check("_get sends our user agent",
+          req.get_header("User-agent") == live.UA, req.headers)
+
+
 def fetch_branches():
     print("\n--- fetch: source order and the cache ---")
     live._cache.clear()
@@ -168,6 +191,15 @@ def fetch_branches():
         check("a source raising is swallowed",
               live.fetch("current price") == "")
 
+    live._cache.clear()
+    with mock.patch.object(live, "_news",
+                           side_effect=RuntimeError("feed down")), \
+         mock.patch.object(live, "_wikipedia", return_value="WIKI"), \
+         mock.patch.object(live, "_search", return_value=""):
+        out = live.fetch("the latest news today")
+    check("a news feed that raises falls through to wikipedia",
+          "WIKI" in out, out[:80])
+
 
 def fetch_cache():
     print("\n--- fetch: a warm cache skips the network ---")
@@ -210,6 +242,7 @@ cleaning()
 news()
 search()
 wikipedia()
+network()
 fetch_branches()
 fetch_cache()
 fetch_truncation()
