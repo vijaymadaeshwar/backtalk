@@ -30,6 +30,9 @@ stack running (brain on 4599, face on 8790).
 | `test_journal.py` | What the session journal writes, what it refuses to write, and what it does when the brain is slow or broken. |
 | `test_bus_park.py` | The bus is never left saying `speaking` by a voice that is gone. |
 | `test_turn_errors.py` | A failed turn always parks the bus and tells the listener. |
+| `test_live.py` | The live-data path offline: trigger detection, each source's parsing, the news then wikipedia then duckduckgo fallback order, and the cache. |
+| `test_main.py` | main.py's helpers and decisions: console verbs, usage phrasing, paste assembly, the human permission wording, config writes, reply batching, and the spoken permission gate (allow/deny/details/interrupt/timeout). |
+| `test_mouth.py` | mouth.py offline: sentence splitting, the elevenlabs then kokoro then espeak fallback chain, the one long-lived output stream, barge-in cutting, the credential lookup, and orphan temp-dir sweeping. |
 | `test_stt_langs.py` | A real English or Tamil sentence survives the trip through Whisper (heavy). |
 | `test_espeak_fallback.py` | Every reply reaches the one English voice, and espeak-ng carries it when Kokoro cannot (heavy). |
 | `test_e2e.py` | One whole turn: speech -> STT -> brain -> TTS -> caption and language on the bus (live). |
