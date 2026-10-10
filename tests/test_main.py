@@ -152,10 +152,26 @@ def typed_input():
     btmain._typed_reader_pipe(queue.Queue(), r3)
     check("a dead descriptor ends the reader quietly", True)
 
+    # blank lines around and between pastes: skipped, not emitted.
+    r5, w5 = os.pipe()
+    on = btmain._PASTE_ON.encode()
+    off = btmain._PASTE_OFF.encode()
+    os.write(w5, b"line1\n\n" + on + off + b"\nlast\n" + on + b"body" + off
+             + b"\n\n")
+    os.close(w5)
+    q5: queue.Queue = queue.Queue()
+    btmain._typed_reader_pipe(q5, r5)
+    os.close(r5)
+    mixed = []
+    while not q5.empty():
+        mixed.append(q5.get_nowait())
+    check("blank lines are skipped around pastes",
+          mixed == ["line1", "last", "body"], mixed)
+
     import builtins
     q3: queue.Queue = queue.Queue()
     with mock.patch.object(builtins, "input",
-                           side_effect=["  hello  ", "│> quoted", EOFError]):
+                           side_effect=["  hello  ", "", "│> quoted", EOFError]):
         btmain._typed_reader_simple(q3)
     simple = []
     while not q3.empty():
@@ -348,6 +364,58 @@ def speak_empty_and_errors():
     check("a raising on_reply callback is swallowed",
           mouth4.chunks == ["One.", "Two."], mouth4.chunks)
 
+    # A speakable-only sentence (all backticks / whitespace) is dropped.
+    brain = FakeBrain(["```", "Real words."])
+    mouth5 = FakeMouth()
+    with mock.patch.object(btmain, "signals"), \
+         mock.patch.object(btmain, "log"):
+        asyncio.run(btmain.speak_reply(brain, mouth5, "hi"))
+    check("an unspeakable sentence is dropped, the next one speaks",
+          mouth5.chunks == ["Real words."], mouth5.chunks)
+
+    # A raise from on_reply on the batched (second) chunk is swallowed.
+    brain = FakeBrain(["One.", "Two.", "Three."])
+    mouth6 = FakeMouth()
+    with mock.patch.object(btmain, "signals"), \
+         mock.patch.object(btmain, "log"):
+        asyncio.run(btmain.speak_reply(brain, mouth6, "hi", on_reply=boom))
+    check("a raising on_reply mid-batch is swallowed",
+          mouth6.chunks == ["One.", "Two. Three."], mouth6.chunks)
+
+    class DeafBrain(FakeBrain):
+        async def interrupt(self):
+            raise RuntimeError("interrupt broke")
+
+    brain = DeafBrain(["One.", asyncio.CancelledError()])
+    mouth7 = FakeMouth()
+    cancelled = False
+    try:
+        with mock.patch.object(btmain, "signals"), \
+             mock.patch.object(btmain, "log"):
+            asyncio.run(btmain.speak_reply(brain, mouth7, "hi"))
+    except asyncio.CancelledError:
+        cancelled = True
+    check("a failing interrupt still lets the cancel through", cancelled)
+
+    # A turn that dies with one sentence still batched, and an on_reply
+    # that also raises: the tail is spoken, the callback's error is eaten.
+    brain = FakeBrain(["One.", "Two.", RuntimeError("mid-stream")])
+    mouth8 = FakeMouth()
+    with mock.patch.object(btmain, "signals"), \
+         mock.patch.object(btmain, "log"):
+        asyncio.run(btmain.speak_reply(brain, mouth8, "hi", on_reply=boom))
+    check("a failing turn still speaks its batched tail",
+          mouth8.chunks == ["One.", "Two."], mouth8.chunks)
+
+    # A clean turn that ends holding exactly one extra sentence.
+    brain = FakeBrain(["One.", "Two."])
+    mouth9 = FakeMouth()
+    with mock.patch.object(btmain, "signals"), \
+         mock.patch.object(btmain, "log"):
+        asyncio.run(btmain.speak_reply(brain, mouth9, "hi"))
+    check("a clean turn flushes its single trailing sentence",
+          mouth9.chunks == ["One.", "Two."], mouth9.chunks)
+
 
 def permission_gate():
     print("\n--- make_permission_gate: speak, wait, decide ---")
@@ -444,6 +512,126 @@ def gate_helpers():
     check("no future -> no-op", True)
 
 
+def journal_flush_case():
+    print("\n--- journal_flush: a hangup never hangs or crashes ---")
+
+    class FakeJournal:
+        def __init__(self, active=True, events=True):
+            self.active = active
+            self.events = events
+            self.written = []
+
+        def transcript(self):
+            return "**you:** hi"
+
+        def write(self, summary):
+            self.written.append(summary)
+            return None
+
+    class FakeScratch:
+        instance = None
+
+        def __init__(self, *a, **k):
+            FakeScratch.instance = self
+            self.started = False
+            self.stopped = False
+
+        async def start(self):
+            self.started = True
+
+        async def stop(self):
+            self.stopped = True
+
+        async def ask_stream(self, text):
+            yield "x"
+
+    j = FakeJournal(active=False)
+    asyncio.run(btmain.journal_flush(j, None))
+    check("an inactive journal is skipped", j.written == [])
+
+    j = FakeJournal(active=True, events=False)
+    asyncio.run(btmain.journal_flush(j, None))
+    check("an empty journal is skipped", j.written == [])
+
+    j = FakeJournal()
+    with mock.patch.object(btmain, "CFG", {"journal_summary": False}), \
+         mock.patch.object(btmain, "log"):
+        asyncio.run(btmain.journal_flush(j, None))
+    check("no summary -> an entry with no summary", j.written == [""])
+
+    async def fake_summarize(ask_stream, text):
+        return "the summary"
+
+    j = FakeJournal()
+    with mock.patch.object(btmain, "CFG", {"journal_summary": True}), \
+         mock.patch.object(btmain, "WarmBrain", FakeScratch), \
+         mock.patch.object(btmain, "journal_summarize", fake_summarize), \
+         mock.patch.object(btmain, "log"):
+        asyncio.run(btmain.journal_flush(j, None))
+    check("a summary is written when asked", j.written == ["the summary"])
+    check("the scratch brain is started and stopped",
+          FakeScratch.instance.started and FakeScratch.instance.stopped)
+
+    class StubbornScratch(FakeScratch):
+        async def stop(self):
+            raise RuntimeError("stop broke")
+
+    j = FakeJournal()
+    with mock.patch.object(btmain, "CFG", {"journal_summary": True}), \
+         mock.patch.object(btmain, "WarmBrain", StubbornScratch), \
+         mock.patch.object(btmain, "journal_summarize", fake_summarize), \
+         mock.patch.object(btmain, "log"):
+        asyncio.run(btmain.journal_flush(j, None))
+    check("a scratch brain that will not stop is swallowed",
+          j.written == ["the summary"])
+
+    class WrittenJournal(FakeJournal):
+        def write(self, summary):
+            self.written.append(summary)
+            return type("P", (), {"name": "entry.md"})()
+
+    j = WrittenJournal()
+    with mock.patch.object(btmain, "CFG", {"journal_summary": False}), \
+         mock.patch.object(btmain, "log") as logged:
+        asyncio.run(btmain.journal_flush(j, None))
+    check("a written entry is logged by name", logged.called)
+
+    class BoomJournal(FakeJournal):
+        def write(self, summary):  # noqa: ARG002
+            raise RuntimeError("disk full")
+
+    j = BoomJournal()
+    with mock.patch.object(btmain, "CFG", {"journal_summary": False}), \
+         mock.patch.object(btmain, "log"):
+        asyncio.run(btmain.journal_flush(j, None))
+    check("a broken write never crashes the hangup", True)
+
+
+def single_instance():
+    print("\n--- _claim_single_instance: one voice line, out loud ---")
+    taken = mock.Mock()
+    taken.bind.side_effect = OSError("in use")
+    with mock.patch.object(btmain.socket, "socket", return_value=taken):
+        btmain._instance_lock = None
+        ok = btmain._claim_single_instance()
+    check("a held port refuses a second voice line", ok is False)
+    check("the loser socket is closed", taken.close.called)
+
+    free = mock.Mock()
+    with mock.patch.object(btmain.socket, "socket", return_value=free):
+        btmain._instance_lock = None
+        ok = btmain._claim_single_instance()
+    check("a free port is claimed",
+          ok is True and btmain._instance_lock is free)
+    check("the winner listens but serves nothing", free.listen.called)
+    btmain._instance_lock = None
+
+    with mock.patch.object(btmain, "signals") as sig:
+        btmain._take_the_bus()
+    check("taking the bus parks it and registers the park",
+          sig.register_exit_park.called and sig.park.called)
+
+
 print("=" * 66)
 print("MAIN HELPERS, REPLY BATCHING, PERMISSION GATE (offline)")
 print("=" * 66)
@@ -456,6 +644,8 @@ speak_first_alone()
 speak_empty_and_errors()
 permission_gate()
 gate_helpers()
+journal_flush_case()
+single_instance()
 
 print("\n" + "=" * 66)
 print("MAIN OK" if not FAILURES else f"MAIN FAILURES: {FAILURES}")
