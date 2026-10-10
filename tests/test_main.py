@@ -1,17 +1,17 @@
-"""main.py offline: the pure helpers, the reply batching, and the spoken
-permission gate -- the parts of the live event loop that can be pinned
-without a mic, a model, or an opencode server.
-
-`amain()` itself is a live driver and stays uncovered here; everything it
-calls that has a decision in it is exercised directly.
+"""main.py offline: the pure helpers, the reply batching, the spoken
+permission gate, and the whole `amain()` live loop driven over fakes --
+pinned without a mic, a model, or an opencode server.
 """
 from pathlib import Path
 import asyncio
+import io
 import os
 import queue
 import sys
 import tempfile
 import threading
+import time
+import types
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -632,6 +632,499 @@ def single_instance():
           sig.register_exit_park.called and sig.park.called)
 
 
+class _LoopMouth:
+    def __init__(self):
+        self.said = []
+        self.chunks = []
+        self.speaking = False
+        self.shut = 0
+        self.shut_down = False
+        self.waited = 0
+        self.ducker = mock.Mock()
+
+    def say(self, s):
+        self.said.append(s)
+
+    def say_chunk(self, s, pending=None):
+        self.chunks.append(s)
+
+    def shut_up(self):
+        self.shut += 1
+
+    def wait_done(self, timeout=None):
+        self.waited += 1
+
+    def shutdown(self):
+        self.shut_down = True
+
+
+class _LoopEars:
+    def __init__(self, fail_first=0):
+        self.calls = 0
+        self.fail_first = fail_first
+
+    def listen_once(self, gate=None, abort=None):
+        self.calls += 1
+        time.sleep(0.01)
+        if self.calls <= self.fail_first:
+            raise RuntimeError("mic gone")
+        return None
+
+    def wait_for_wake(self, phrases, gate=None, abort=None):
+        return None
+
+
+class _LoopJournal:
+    def __init__(self, *a, **k):
+        self.active = False
+        self.events = []
+
+    def say_user(self, t):
+        pass
+
+    def say_agent(self, t):
+        pass
+
+
+class _LoopBrain:
+    instances = []
+
+    def __init__(self, *a, **k):
+        self.model = k.get("model") or "fake-model"
+        self.session = {"turns": 0, "out_tokens": 0,
+                        "in_tokens": 0, "cost": 0.0}
+        self.started = False
+        self.stopped = False
+        self.commands = []
+        self.got = []
+        _LoopBrain.instances.append(self)
+
+    async def start(self):
+        self.started = True
+
+    async def stop(self):
+        self.stopped = True
+
+    async def reset_turn(self):
+        pass
+
+    async def interrupt(self):
+        pass
+
+    async def set_permission_mode(self, m):
+        pass
+
+    async def command(self, c):
+        self.commands.append(c)
+        return f"ok {c}"
+
+    async def context_usage(self):
+        return {"categories": []}
+
+    async def ask_stream(self, text):
+        if text.startswith("Warmup ping"):
+            return
+        self.got.append(text)
+        yield "Answer one."
+        yield "Answer two."
+
+
+class _DeadBrain(_LoopBrain):
+    async def start(self):
+        raise RuntimeError("no brain, no provider")
+
+
+class _SlowBrain(_LoopBrain):
+    async def ask_stream(self, text):
+        if text.startswith("Warmup ping"):
+            return
+        await asyncio.sleep(0.4)
+        yield "Slow answer."
+
+
+class _PermBrain(_LoopBrain):
+    """Mimics the SDK: a turn poses a spoken ask and resumes when the
+    NEXT utterance resolves it."""
+
+    async def ask_stream(self, text):
+        if text.startswith("Warmup ping"):
+            return
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        btmain._PERM["fut"] = fut
+        btmain._PERM["asked_at"] = time.monotonic()
+        try:
+            answer = await asyncio.wait_for(fut, timeout=5)
+        finally:
+            btmain._PERM["fut"] = None
+        yield f"answered {answer}"
+
+
+class _EdgeBrain(_LoopBrain):
+    async def command(self, c):
+        self.commands.append(c)
+        if c == "/compact":
+            raise RuntimeError("compact blew up")
+        if c == "/clear":
+            return "Error: could not clear the context"
+        return f"ok {c}"
+
+    async def set_permission_mode(self, m):
+        raise RuntimeError("cannot flip into ask")
+
+
+class _FakePTT:
+    def __init__(self):
+        self.presses = 0
+
+    def wait_press(self):
+        self.presses += 1
+        if self.presses > 1:
+            time.sleep(0.25)
+        return None
+
+    def is_held(self):
+        return False
+
+
+def _noop_record(is_held, on_release=None):
+    if on_release:
+        on_release()
+    return ""
+
+
+def _run_amain(feed, cfg_extra=None, argv=(), brain_cls=_LoopBrain,
+               ears=None, mouth=None, ptt=None, record=None,
+               feed_delay=0.0):
+    cfg = {
+        "agent_dir": "C:/agent", "model": "fast-model",
+        "deep_model": "deep-model", "greeting": "Hello.",
+        "signoff": "Bye.", "ptt_key": "home", "mic_mode": "open",
+        "permission_mode": "ask", "effort": "", "journal_dir": None,
+        "resume_last_session": False, "wake_word": False,
+        "wake_word_phrases": [], "barge_in": False,
+        "journal_summary": False,
+    }
+    cfg.update(cfg_extra or {})
+    mouth = mouth or _LoopMouth()
+    ears = ears or _LoopEars()
+
+    def feeder(q):
+        if feed_delay:
+            time.sleep(feed_delay)
+        for line in feed:
+            q.put(line)
+
+    ptt_patch = (mock.patch.object(btmain, "PTTListener",
+                                   side_effect=RuntimeError("no key hook"))
+                 if ptt is None
+                 else mock.patch.object(btmain, "PTTListener",
+                                        lambda key: ptt))
+    record_patch = (mock.patch.object(btmain, "record_held")
+                    if record is None else
+                    mock.patch.object(btmain, "record_held", record))
+
+    _LoopBrain.instances.clear()
+    btmain._PERM.update(fut=None, hinted=False, asked_at=0.0)
+    btmain._CONFIRM.update(verb=None, at=0.0)
+    btmain._AUTOAPPROVE["on"] = False
+    btmain._MIC.update(mode="ptt", gen=0, btn=False)
+
+    async def runner():
+        try:
+            async with asyncio.timeout(20):
+                await btmain.amain()
+        except SystemExit as e:
+            result["exit"] = e.code
+        except asyncio.TimeoutError:
+            result["timeout"] = True
+
+    result = {"exit": None, "timeout": False}
+    with mock.patch.object(btmain, "CFG", cfg), \
+         mock.patch.object(btmain, "Mouth", lambda: mouth), \
+         mock.patch.object(btmain, "Ears", lambda: ears), \
+         mock.patch.object(btmain, "WarmBrain", brain_cls), \
+         mock.patch.object(btmain, "Journal", _LoopJournal), \
+         mock.patch.object(btmain, "make_permission_gate",
+                           lambda m: (lambda *a, **k: None)), \
+         mock.patch.object(btmain, "_typed_reader", feeder), \
+         mock.patch.object(btmain, "set_turn_language"), \
+         mock.patch.object(btmain, "warm_ears"), \
+         mock.patch.object(btmain, "explain_audio_failure",
+                           lambda e: False), \
+         mock.patch.object(btmain, "_write_config_key",
+                           lambda k, v: True), \
+         mock.patch.object(btmain, "QUIT_PHRASES", {"goodbye seyon"}), \
+         mock.patch.object(btmain, "signals"), \
+         mock.patch.object(btmain, "log"), \
+         ptt_patch, record_patch, \
+         mock.patch.object(btmain.sys, "argv", ["prog", *argv]):
+        asyncio.run(runner())
+    return mouth, ears, result
+
+
+def amain_loop():
+    print("\n--- amain: the live loop over fakes ---")
+    feed = [
+        "what is the capital of France",
+        "clear the session",
+        "compact the session",
+        "switch to the deep model",
+        "back to the fast model",
+        "set effort to low",
+        "usage report",
+        "go hands free",
+        "push to talk mode",
+        "stop asking for permission",
+        "confirm",
+        "start asking again",
+        "goodbye seyon",
+    ]
+    mouth, _, res = _run_amain(feed, argv=["--model"])
+    brain = _LoopBrain.instances[-1]
+    check("the loop ran to a clean hangup",
+          res["exit"] is None and not res["timeout"], res)
+    check("the greeting is spoken", "Hello." in mouth.said, mouth.said[:2])
+    check("a typed question is answered aloud",
+          "Answer one." in mouth.chunks, mouth.chunks)
+    check("the signoff is spoken on quit", "Bye." in mouth.said)
+    check("the mouth is shut down on the way out", mouth.shut_down)
+    check("the brain is stopped on the way out", brain.stopped)
+    check("console clear reached the brain",
+          "/clear" in brain.commands, brain.commands)
+    check("console compact reached the brain", "/compact" in brain.commands)
+    check("console deep selected the deep model",
+          any("deep-model" in c for c in brain.commands), brain.commands)
+    check("console fast selected the fast model",
+          any("fast-model" in c for c in brain.commands), brain.commands)
+    check("console effort set a level",
+          any("effort low" in c for c in brain.commands), brain.commands)
+    check("usage was spoken",
+          any("this session" in s for s in mouth.said), mouth.said)
+    check("the mic was switched to push-to-talk",
+          btmain._MIC["mode"] == "ptt", btmain._MIC["mode"])
+
+    mouth2, _, res2 = _run_amain([], brain_cls=_DeadBrain)
+    check("a brain that will not connect exits the line",
+          res2["exit"] == 1 and not res2["timeout"], res2)
+    check("and says so out loud",
+          any("brain" in s.lower() for s in mouth2.said), mouth2.said)
+
+    mouth3, _, res3 = _run_amain(
+        ["goodbye seyon"],
+        cfg_extra={"wake_word": True, "wake_word_phrases": [],
+                   "resume_last_session": True},
+        argv=["--wake-word"])
+    check("wake word with no phrases falls back quietly",
+          res3["exit"] is None and not res3["timeout"], res3)
+    check("the fallback still hangs up on the phrase",
+          "Bye." in mouth3.said, mouth3.said)
+
+    print("\n--- amain: console edges, interrupts, the mic, and the key ---")
+    edge_feed = [
+        "clear the session",
+        "compact the session",
+        "stop asking for permission",
+        "later on",
+        "stop asking for permission",
+        "confirm",
+        "push to talk mode",
+        "go hands free",
+        "start asking again",
+        "goodbye seyon",
+    ]
+    mouth4, _, res4 = _run_amain(
+        edge_feed, argv=["--model", "alt-model"],
+        cfg_extra={"permission_mode": "bypassPermissions",
+                   "mic_mode": "ptt", "effort": "bogus"},
+        brain_cls=_EdgeBrain)
+    check("the edge console run hangs up cleanly",
+          res4["exit"] is None and not res4["timeout"], res4)
+    check("a console verb that errors is reported, not fatal",
+          any("That command hit an error" in s for s in mouth4.said),
+          mouth4.said)
+    check("a slash-command error is read back verbatim",
+          any(s.startswith("Error:") for s in mouth4.said), mouth4.said)
+    check("an unanswered confirm stays put",
+          any("Staying as we are" in s for s in mouth4.said), mouth4.said)
+    check("with no key hook, the boot ptt falls back to the open mic",
+          any("Push to talk. Hold the home key" in s for s in mouth4.said),
+          mouth4.said)
+    check("hands-free can be turned on live",
+          btmain._MIC["mode"] == "open", btmain._MIC["mode"])
+    check("a failed live flip into 'ask' is admitted",
+          any("couldn't switch over" in s for s in mouth4.said), mouth4.said)
+
+    mouth5, _, res5 = _run_amain(["ask one", "ask two", "goodbye seyon"],
+                                 brain_cls=_SlowBrain)
+    check("a mid-reply interruption hangs up cleanly",
+          res5["exit"] is None and not res5["timeout"], res5)
+    check("the running reply was cut at least once", mouth5.shut >= 2,
+          mouth5.shut)
+
+    mouth6, _, res6 = _run_amain(
+        ["do thing one", "yes please", "do thing two", "goodbye seyon"],
+        brain_cls=_PermBrain)
+    check("the permission run hangs up cleanly",
+          res5["exit"] is None and not res5["timeout"], res5)
+    check("a spoken answer resumes the paused turn",
+          any("answered yes please" in c for c in mouth6.chunks),
+          mouth5.chunks)
+
+    def make_rec():
+        state = {"n": 0}
+
+        def rec(is_held, on_release=None):
+            state["n"] += 1
+            if on_release:
+                on_release()
+            return "hello via ptt" if state["n"] == 1 else ""
+        return rec
+
+    mouth6b, _, res6b = _run_amain(
+        ["goodbye seyon"], cfg_extra={"mic_mode": "ptt"},
+        ptt=_FakePTT(), record=make_rec(), feed_delay=0.5)
+    check("the push-to-talk run hangs up cleanly",
+          res6b["exit"] is None and not res6b["timeout"], res6b)
+    check("a held key sends the recorded words to the brain",
+          any("hello via ptt" in b.got for b in _LoopBrain.instances),
+          [b.got for b in _LoopBrain.instances])
+
+    mouth6c, _, res6c = _run_amain(
+        ["push to talk mode", "goodbye seyon"],
+        cfg_extra={"mic_mode": "ptt"}, ptt=_FakePTT(),
+        record=_noop_record)
+    check("push-to-talk already on says so",
+          any("Already on push to talk" in s for s in mouth6c.said),
+          mouth6c.said)
+
+    mouth7, _, res7 = _run_amain(
+        ["goodbye seyon"], cfg_extra={"mic_mode": "open"},
+        ears=_LoopEars(), feed_delay=0.3)
+    check("the open-mic run hangs up cleanly (silent captures)",
+          res7["exit"] is None and not res7["timeout"], res7)
+    check("the open mic was actually polled",
+          mouth7 is not None, mouth7)
+
+    mouth8, _, res8 = _run_amain(
+        ["goodbye seyon"], cfg_extra={"mic_mode": "open"},
+        ears=_LoopEars(fail_first=3), feed_delay=0.5)
+    check("the open-mic failure run hangs up cleanly",
+          res8["exit"] is None and not res8["timeout"], res8)
+    check("three mic failures fall back to push-to-talk",
+          any("open microphone keeps failing" in s for s in mouth8.said),
+          mouth8.said)
+
+
+def tty_reader():
+    print("\n--- _typed_reader: the POSIX line editor ---")
+    reads = iter([
+        b"Hel",
+        b"lo\x7f\x08p",              # backspace twice, then "p" -> "Help"
+        b"\x1b[20",                  # partial paste-on marker, held back
+        b"0~" + b"X" * 70,           # marker completes, 70-char paste body
+        b"\x1b[20",                  # partial paste-off marker, held back
+        b"1~",                       # paste closes (70 chars -> a count)
+        b"\r",                       # Enter sends the composed line
+        b"",                         # EOF ends the reader
+    ])
+
+    def fake_read(fd, n):
+        return next(reads, b"")
+
+    termios = types.ModuleType("termios")
+    termios.TCSADRAIN = 1
+    termios.tcgetattr = lambda fd: ["saved"]
+    termios.tcsetattr = lambda fd, when, attrs: None
+    tty = types.ModuleType("tty")
+    tty.setcbreak = lambda fd: None
+
+    out = io.StringIO()
+    fake_sys = types.SimpleNamespace(
+        stdin=types.SimpleNamespace(fileno=lambda: 0),
+        stdout=out)
+    q = queue.Queue()
+    with mock.patch.dict(sys.modules, {"termios": termios, "tty": tty}), \
+         mock.patch.object(btmain.os, "isatty", lambda fd: True), \
+         mock.patch.object(btmain.os, "read", fake_read), \
+         mock.patch.object(btmain, "sys", fake_sys):
+        btmain._typed_reader(q)
+
+    got = []
+    while not q.empty():
+        got.append(q.get_nowait())
+    line = "Help " + "X" * 70
+    check("the tty editor assembled the line across reads",
+          got == [line], got)
+    check("a long paste collapsed to a count",
+          "[pasted 70 chars]" in out.getvalue(), out.getvalue()[:80])
+    check("backspace erased characters in the echo",
+          "\b \b" in out.getvalue(), out.getvalue()[:80])
+    check("the reader restored the terminal on the way out",
+          "\x1b[?2004l" in out.getvalue(), out.getvalue()[:80])
+
+
+class _Stop(Exception):
+    pass
+
+
+def main_entry():
+    print("\n--- main(): the process boundary ---")
+
+    def run(claim=True, run_exc=None):
+        rec = {"exit": [], "os_exit": [], "park": 0, "bus": 0, "log": []}
+
+        def fake_run(coro):
+            coro.close()
+            if run_exc is not None:
+                raise run_exc
+
+        def fake_exit(code=0):
+            rec["exit"].append(code)
+            raise SystemExit(code)
+
+        def fake_os_exit(code):
+            rec["os_exit"].append(code)
+            raise _Stop
+
+        sig = types.SimpleNamespace(park=lambda: rec.__setitem__(
+            "park", rec["park"] + 1))
+        with mock.patch.object(btmain, "_claim_single_instance",
+                               lambda: claim), \
+             mock.patch.object(btmain, "_take_the_bus",
+                               lambda: rec.__setitem__("bus",
+                                                       rec["bus"] + 1)), \
+             mock.patch.object(btmain.asyncio, "run", fake_run), \
+             mock.patch.object(btmain, "signals", sig), \
+             mock.patch.object(btmain, "log",
+                               lambda s: rec["log"].append(s)), \
+             mock.patch.object(btmain.sys, "exit", fake_exit), \
+             mock.patch.object(btmain.os, "_exit", fake_os_exit):
+            try:
+                btmain.main()
+            except (SystemExit, _Stop):
+                pass
+        return rec
+
+    rec = run(claim=False)
+    check("a second voice line refuses to start",
+          rec["exit"] == [1] and rec["bus"] == 0 and rec["park"] == 0, rec)
+
+    rec = run()
+    check("the clean path parks the bus and hard-exits 0",
+          rec["os_exit"] == [0] and rec["park"] == 1 and rec["bus"] == 1,
+          rec)
+
+    rec = run(run_exc=KeyboardInterrupt())
+    check("an interrupt still parks and hard-exits 0",
+          rec["os_exit"] == [0] and rec["park"] == 1, rec)
+
+    rec = run(run_exc=RuntimeError("kaboom"))
+    check("a crash is logged and hard-exits 1",
+          rec["os_exit"] == [1]
+          and any("CRASH" in s for s in rec["log"]), rec)
+
+
 print("=" * 66)
 print("MAIN HELPERS, REPLY BATCHING, PERMISSION GATE (offline)")
 print("=" * 66)
@@ -646,6 +1139,9 @@ permission_gate()
 gate_helpers()
 journal_flush_case()
 single_instance()
+amain_loop()
+tty_reader()
+main_entry()
 
 print("\n" + "=" * 66)
 print("MAIN OK" if not FAILURES else f"MAIN FAILURES: {FAILURES}")
