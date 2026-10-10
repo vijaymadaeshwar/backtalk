@@ -136,6 +136,47 @@ def typed_input():
     check("paste collapsed into one message", "pasted lines" in got, got)
     check("line after the paste still read", "last line" in got, got)
 
+    # a paste marker with no closing marker yet: hold it, then EOF.
+    r2, w2 = os.pipe()
+    q2: queue.Queue = queue.Queue()
+    os.write(w2, b"\x1b[200~unfinished")
+    os.close(w2)
+    btmain._typed_reader_pipe(q2, r2)
+    os.close(r2)
+    check("an unterminated paste is held, not emitted", q2.empty())
+
+    # a closed descriptor: the reader must return, not raise.
+    r3, w3 = os.pipe()
+    os.close(r3)
+    os.close(w3)
+    btmain._typed_reader_pipe(queue.Queue(), r3)
+    check("a dead descriptor ends the reader quietly", True)
+
+    import builtins
+    q3: queue.Queue = queue.Queue()
+    with mock.patch.object(builtins, "input",
+                           side_effect=["  hello  ", "│> quoted", EOFError]):
+        btmain._typed_reader_simple(q3)
+    simple = []
+    while not q3.empty():
+        simple.append(q3.get_nowait())
+    check("the simple reader scrubs and queues",
+          simple == ["hello", "quoted"], simple)
+
+    r4, w4 = os.pipe()
+    os.write(w4, b"piped line\n")
+    os.close(w4)
+    q4: queue.Queue = queue.Queue()
+    fake_stdin = mock.Mock()
+    fake_stdin.fileno.return_value = r4
+    with mock.patch.object(btmain.sys, "stdin", fake_stdin):
+        btmain._typed_reader(q4)
+    os.close(r4)
+    piped = []
+    while not q4.empty():
+        piped.append(q4.get_nowait())
+    check("a non-tty stdin is read as lines", piped == ["piped line"], piped)
+
 
 def human_forms():
     print("\n--- _human_what / _full_detail ---")

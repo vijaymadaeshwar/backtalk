@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np                                          # noqa: E402
@@ -106,6 +107,102 @@ check("static_stop is safe with nothing playing", True)
 
 signals.register_exit_park()
 check("register_exit_park installs cleanly", True)
+
+# Every write is wrapped: a path the bus cannot write must never raise.
+with mock.patch.object(signals, "_STATE_FILE", _TMP), \
+     mock.patch.object(signals, "_BH_STATE", _TMP), \
+     mock.patch.object(signals, "_DIRECTION_FILE", _TMP), \
+     mock.patch.object(signals, "_LANG_FILE", _TMP), \
+     mock.patch.object(signals, "_REPLY_DONE_FILE", _TMP), \
+     mock.patch.object(signals, "_RATE_LIMIT_FILE", _TMP), \
+     mock.patch.object(signals, "_WAVEFORM_FILE", _TMP), \
+     mock.patch.object(signals, "_BH_WAVE", _TMP), \
+     mock.patch.object(signals, "_CAPTION_FILE", _TMP):
+    signals.set_state("x")
+    signals.direction(["<<a>>"])
+    signals.language("en")
+    signals.reply_done()
+    signals.set_rate_limit("w", 0.1, 1)
+    signals._last_waveform_write = 0.0
+    signals.feed_waveform(pcm)
+    signals.caption("x")
+    signals.caption_clear()
+check("an unwritable bus path never raises", True)
+
+with mock.patch.object(signals, "_BH_STATE", ""):
+    signals.set_state("idle")
+check("state writes without a barehands mirror",
+      read(os.path.join(_TMP, ".voice_state")) == "idle")
+
+# The throttle is what keeps a 60fps reader cheap.
+before_ts = json.loads(read(os.path.join(_TMP, ".voice_waveform")))["ts"]
+signals._last_waveform_write = 1000.0
+with mock.patch.object(signals.time, "time", return_value=1000.005):
+    signals.feed_waveform(pcm)
+after_ts = json.loads(read(os.path.join(_TMP, ".voice_waveform")))["ts"]
+check("a waveform inside the throttle window is dropped",
+      after_ts == before_ts, (before_ts, after_ts))
+
+# _player_cmd: whichever platform, and whichever player exists.
+with mock.patch.object(signals, "sys", mock.Mock(platform="darwin")):
+    check("macOS uses afplay",
+          signals._player_cmd("s.wav") == ["afplay", "-v", "0.35", "s.wav"])
+with mock.patch.object(signals, "sys", mock.Mock(platform="linux")), \
+     mock.patch("shutil.which",
+                side_effect=lambda c: f"/usr/bin/{c}" if c == "ffplay" else None):
+    cmd = signals._player_cmd("s.wav")
+    check("linux prefers ffplay with a quiet volume",
+          cmd is not None and cmd[0] == "ffplay" and "quiet" in cmd, cmd)
+with mock.patch.object(signals, "sys", mock.Mock(platform="linux")), \
+     mock.patch("shutil.which",
+                side_effect=lambda c: f"/usr/bin/{c}" if c == "aplay" else None):
+    check("falls back to aplay when ffplay is absent",
+          signals._player_cmd("s.wav") == ["aplay", "s.wav"])
+with mock.patch.object(signals, "sys", mock.Mock(platform="linux")), \
+     mock.patch("shutil.which", return_value=None):
+    check("no player at all", signals._player_cmd("s.wav") is None)
+
+# static_start / static_stop with a real thinking sound.
+_sound = os.path.join(_TMP, "think.wav")
+open(_sound, "w").close()
+fake_proc = mock.Mock(pid=4321)
+with mock.patch.object(signals, "_THINKING_SOUND", _sound), \
+     mock.patch.object(signals, "_player_cmd", return_value=["afplay", "s"]), \
+     mock.patch.object(signals.subprocess, "Popen", return_value=fake_proc):
+    signals.static_start()
+check("thinking sound starts and records its pid",
+      signals._static_proc is fake_proc
+      and read(os.path.join(_TMP, ".voice_loading_pid")) == "4321")
+signals.static_stop()
+check("static_stop terminates it and clears the pid file",
+      signals._static_proc is None
+      and not os.path.exists(os.path.join(_TMP, ".voice_loading_pid")))
+
+with mock.patch.object(signals, "_THINKING_SOUND", _sound), \
+     mock.patch.object(signals, "_player_cmd", return_value=None):
+    signals.static_start()
+check("no player -> no thinking sound", signals._static_proc is None)
+with mock.patch.object(signals, "_THINKING_SOUND",
+                       os.path.join(_TMP, "think.wav")), \
+     mock.patch.object(signals, "_player_cmd", return_value=["afplay", "s"]), \
+     mock.patch.object(signals.subprocess, "Popen",
+                       side_effect=OSError("cannot spawn")):
+    signals.static_start()
+check("a spawn failure leaves no process behind", signals._static_proc is None)
+
+# A player that will not die must not take the bus down either.
+dead = mock.Mock()
+dead.terminate.side_effect = OSError("already gone")
+signals._static_proc = dead
+signals.static_stop()
+check("a stubborn player is forgotten, not fatal",
+      signals._static_proc is None)
+
+# No barehands hooked up: the wave write skips the mirror entirely.
+with mock.patch.object(signals, "_BH_WAVE", ""):
+    signals._last_waveform_write = 0.0
+    signals.feed_waveform(pcm)
+check("a waveform writes without a barehands mirror", True)
 
 print("\n" + "=" * 66)
 print("SIGNALS OK" if not failures else "SIGNALS FAILURES: %s" % failures)
