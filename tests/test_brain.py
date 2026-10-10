@@ -208,6 +208,14 @@ async def scenario_timeout():
               len(out) == 1 and "did not get an answer" in out[0], out)
         check("the stall interrupts the turn",
               any("abort" in p for _, p, _ in fake.requests), fake.requests)
+
+        async def boom():
+            raise RuntimeError("abort refused")
+        b.interrupt = boom
+        fake.events = []                       # next_event returns None again
+        out = [c async for c in b.ask_stream("slow again")]
+        check("a stall whose interrupt itself fails is swallowed",
+              len(out) == 1 and "did not get an answer" in out[0], out)
     finally:
         CFG["turn_timeout"] = old
         brain._Server = saved

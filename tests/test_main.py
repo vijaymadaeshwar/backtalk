@@ -880,6 +880,37 @@ class _FakePTT:
         return False
 
 
+class _TimedPress(_FakePTT):
+    """A key that reports a press only after a delay, so it can be made
+    to land while other work (a reply, a capture) is still in flight."""
+
+    def __init__(self, delay):
+        super().__init__()
+        self._delay = delay
+
+    def wait_press(self):
+        self.presses += 1
+        time.sleep(self._delay)
+        return None
+
+
+class _StaleCaptureEars(_LoopEars):
+    """A capture slow enough to resolve only after a live mode switch."""
+
+    def listen_once(self, gate=None, abort=None):
+        self.calls += 1
+        time.sleep(0.4)
+        return None
+
+
+class _KbBrain(_LoopBrain):
+    """A command that raises KeyboardInterrupt out of the turn loop."""
+
+    async def command(self, c):
+        self.commands.append(c)
+        raise KeyboardInterrupt
+
+
 def _noop_record(is_held, on_release=None):
     if on_release:
         on_release()
@@ -902,11 +933,20 @@ def _run_amain(feed, cfg_extra=None, argv=(), brain_cls=_LoopBrain,
     mouth = mouth or _LoopMouth()
     ears = ears or _LoopEars()
 
+    release = threading.Event()
+
     def feeder(q):
         if feed_delay:
             time.sleep(feed_delay)
         for line in feed:
             q.put(line)
+        # The loop often returns while its last `typed_q.get` is still
+        # parked in a pool thread. That thread is non-daemon, so leaving
+        # it blocked hangs interpreter shutdown. Once the run is over,
+        # hand the abandoned getters a few empty lines to release them.
+        release.wait(30)
+        for _ in range(8):
+            q.put("")
 
     ptt_patch = (mock.patch.object(btmain, "PTTListener",
                                    side_effect=RuntimeError("no key hook"))
@@ -953,6 +993,8 @@ def _run_amain(feed, cfg_extra=None, argv=(), brain_cls=_LoopBrain,
          ptt_patch, record_patch, \
          mock.patch.object(btmain.sys, "argv", ["prog", *argv]):
         asyncio.run(runner())
+    release.set()
+    time.sleep(0.1)
     return mouth, ears, result
 
 
@@ -1185,6 +1227,13 @@ def amain_loop():
     check("an unrecognized record failure is only logged",
           res_rbh["exit"] is None and not res_rbh["timeout"], res_rbh)
 
+    mouth_cf, _, res_cf = _run_amain(
+        ["stop asking for permission", "goodbye seyon"])
+    check("a quit phrase cancels a pending confirm and hangs up",
+          res_cf["exit"] is None and not res_cf["timeout"], res_cf)
+    check("the signoff still plays",
+          "Bye." in mouth_cf.said, mouth_cf.said)
+
     def rec_quit(is_held, on_release=None):
         if on_release:
             on_release()
@@ -1196,12 +1245,33 @@ def amain_loop():
     check("a quit phrase spoken into the key hangs up",
           res_rq["exit"] is None and not res_rq["timeout"], res_rq)
 
-    mouth_cf, _, res_cf = _run_amain(
-        ["stop asking for permission", "goodbye seyon"])
-    check("a quit phrase cancels a pending confirm and hangs up",
-          res_cf["exit"] is None and not res_cf["timeout"], res_cf)
     check("the signoff still plays",
           "Bye." in mouth_cf.said, mouth_cf.said)
+
+    def rec_hangup(is_held, on_release=None):
+        if on_release:
+            on_release()
+        return "goodbye seyon"
+
+    mouth_kb, _, res_kb = _run_amain(
+        ["clear the session"], brain_cls=_KbBrain)
+    check("a KeyboardInterrupt out of a turn unwinds the loop cleanly",
+          res_kb["exit"] is None and not res_kb["timeout"], res_kb)
+    check("an interrupt does not play the signoff",
+          "Bye." not in mouth_kb.said, mouth_kb.said)
+
+    _, _, res_pi = _run_amain(
+        ["please answer"], cfg_extra={"mic_mode": "ptt"},
+        brain_cls=_SlowBrain, ptt=_TimedPress(0.15), record=rec_quit)
+    check("a key press while a reply streams interrupts and hangs up",
+          res_pi["exit"] is None and not res_pi["timeout"], res_pi)
+
+    _, _, res_st = _run_amain(
+        ["push to talk mode", "go hands free"],
+        cfg_extra={"mic_mode": "open"}, ears=_StaleCaptureEars(),
+        ptt=_TimedPress(0.6), record=rec_quit)
+    check("a capture born before a mode switch is discarded unprocessed",
+          res_st["exit"] is None and not res_st["timeout"], res_st)
 
 
 def tty_reader():
