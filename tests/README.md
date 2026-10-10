@@ -20,7 +20,7 @@ stack running (brain on 4599, face on 8790).
 | --- | --- |
 | `test_wake.py` | Wake phrases are recognised however whisper spells or punctuates them, stripped without damaging the command, and the shipped phrases are Latin-only. |
 | `test_pipeline.py` | One whole turn offline: a scripted mic through the real endpointer and wake gate, `strip_wake`, and the real sentence batching into a fake mouth and brain. |
-| `test_brain.py` | The brain against a fake opencode server: sentence streaming, reasoning-vs-text filtering, empty/timed-out/errored turns, permission routing, slash-commands, usage tallying -- plus a real localhost HTTP+SSE server for the wire code. |
+| `test_brain.py` | The brain against a fake opencode server: sentence streaming, reasoning-vs-text filtering, empty/timed-out/errored turns, permission routing, slash-commands, usage tallying, the session drain and resume, plus the server lifecycle: health probing, spawn and its launch command, the streaming event reader and its reconnect, and the HTTP/SSE wire code. |
 | `test_signals.py` | Every file the signal bus writes: state, caption, language, directions, rate limits, reply-done, waveform -- and that no write ever raises. |
 | `test_ducking.py` | Spotify duck/restore/debounce logic with the AppleScript bridge stubbed, the off-macOS no-ops, and the permission-result vocabulary. |
 | `test_endpointing.py` | The open-mic endpointer opens and closes on schedule, and the hands-free gates (loudness floor, minimum phrase length, and the model's own no-speech score) drop noise before whisper sees it. |
