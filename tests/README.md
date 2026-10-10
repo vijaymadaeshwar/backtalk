@@ -30,6 +30,7 @@ stack running (brain on 4599, face on 8790).
 | `test_encoding.py` | Every text file is clean UTF-8: no BOM, no double-encoding. |
 | `test_journal.py` | What the session journal writes, what it refuses to write, and what it does when the brain is slow or broken. |
 | `test_vlog.py` | The session log: the terminal line, the timestamped append, the ascii fallback when the console refuses utf-8, the swallowed unwritable log file, and `_init_console`'s Windows and non-Windows paths. |
+| `test_config.py` | config.load: the merge over defaults, the file wounds it forgives (missing, BOM, invalid JSON), the derived paths and placeholders, `visible_skills` being named as a no-op, the open-mic greeting swap, `discipline_append`, and `refresh_clock`. |
 | `test_bus_park.py` | The bus is never left saying `speaking` by a voice that is gone. |
 | `test_turn_errors.py` | A failed turn always parks the bus and tells the listener. |
 | `test_live.py` | The live-data path offline: trigger detection, each source's parsing, the news then wikipedia then duckduckgo fallback order, and the cache. |
