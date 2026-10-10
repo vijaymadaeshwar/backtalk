@@ -32,7 +32,7 @@ LIVE = {"test_e2e.py", "test_live_path.py"}
 # the real audio sinks (mouth's kokoro/elevenlabs streaming), the brain's
 # provider glue, and the keychain/secret-tool lookups. Raise this whenever
 # the real number rises -- never lower it to pass.
-COVERAGE_FLOOR = 91
+COVERAGE_FLOOR = 93
 
 
 def discover(fast: bool, every: bool) -> list[str]:

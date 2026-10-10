@@ -9,9 +9,14 @@ brain.py's translation both speak, so their exact shape is pinned here.
 import sys
 import time
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backtalk import ducking, permresult                       # noqa: E402
+
+real_osa = ducking._osa
+real_set_volume = ducking._set_volume
+real_spotify_volume = ducking._spotify_volume
 
 failures = []
 
@@ -108,6 +113,52 @@ deny = permresult.PermissionResultDeny()
 check("deny defaults to behavior 'deny'", deny.behavior == "deny")
 check("deny defaults to no message", deny.message == "")
 check("deny defaults to no interrupt", deny.interrupt is False)
+
+# ---- the pieces the AppleScript bridge hides ----------------------------
+ducking._DARWIN = True
+
+
+class _Run:
+    stdout = "  42  \n"
+
+
+with mock.patch.object(ducking.subprocess, "run", lambda *a, **k: _Run()):
+    check("the real bridge strips osascript's stdout",
+          real_osa("script") == "42")
+with mock.patch.object(ducking.subprocess, "run",
+                       side_effect=OSError("no osascript")):
+    check("a failed osascript reads as None", real_osa("script") is None)
+
+scripts = []
+ducking._osa = lambda script, timeout=2.0: scripts.append(script) or "true"
+real_set_volume(42)
+check("_set_volume asks Spotify for the new level",
+      any("42" in s for s in scripts), scripts)
+
+ducking._osa = lambda script, timeout=2.0: "true" if "is running" in script else None
+check("Spotify with no volume read reads as None",
+      real_spotify_volume() is None)
+
+ducking._osa = lambda script, timeout=2.0: "true" if "is running" in script else "not a number"
+check("a garbled volume reads as None",
+      real_spotify_volume() is None)
+
+calls.clear()
+idle = ducking.Ducker()
+ducking._spotify_volume = lambda: 80
+ducking._set_volume = lambda level: calls.append(level)
+idle._restore()
+check("_restore with nothing ducked is a no-op",
+      calls == [] and idle._timer is None)
+
+ducking._spotify_volume = lambda: 80
+calls.clear()
+d4 = ducking.Ducker()
+d4.speech_start()
+d4.speech_end(debounce=5.0)          # long timer, not yet fired
+d4.restore_now()
+check("restore_now cancels the timer and restores at once",
+      d4._original is None and d4._timer is None and calls == [48, 80], calls)
 
 print("\n" + "=" * 66)
 print("DUCKING OK" if not failures else "DUCKING FAILURES: %s" % failures)

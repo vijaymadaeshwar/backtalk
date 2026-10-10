@@ -136,6 +136,10 @@ def espeak_early_returns():
          mock.patch.object(mouth, "espeak_voice_for", return_value="en"):
         check("blank text -> silence",
               list(mouth._stream_espeak("   ", "en")) == [])
+    with mock.patch.object(mouth, "_ESPEAK", ""), \
+         mock.patch.object(mouth, "espeak_voice_for", return_value="en"):
+        check("a voice but no binary -> silence",
+              list(mouth._stream_espeak("hi", "en")) == [])
 
 
 def synth_chain():
@@ -176,6 +180,16 @@ def synth_chain():
             out = list(mouth.synth_stream("hi"))
         check("every engine failing -> no audio at all", out == [], out)
 
+        with mock.patch.object(mouth, "log") as logged, \
+             mock.patch.object(mouth, "_elevenlabs_ready", return_value=False), \
+             mock.patch.object(mouth, "_stream_kokoro",
+                               side_effect=lambda t: iter([])), \
+             mock.patch.object(mouth, "_stream_espeak",
+                               side_effect=lambda t, l: iter([])):
+            out = list(mouth.synth_stream("hi"))
+        check("every engine silent -> no audio", out == [], out)
+        check("the silence is admitted in the log", logged.called)
+
 
 def keys():
     print("\n--- the ElevenLabs key comes from a store, not a file ---")
@@ -197,6 +211,34 @@ def keys():
         again = mouth._get_elevenlabs_key()
     check("cached: the store is not read twice",
           again == "secret" and not run2.called, again)
+
+    mouth._el_key_cache = None
+    with mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth.sys, "platform", "darwin"), \
+         mock.patch.object(mouth.subprocess, "run",
+                           return_value=mock.Mock(returncode=1, stdout="")), \
+         mock.patch.dict(os.environ, {}, clear=True):
+        got = mouth._get_elevenlabs_key()
+    check("a keychain miss (non-zero) leaves no key", got == "", got)
+
+    mouth._el_key_cache = None
+    with mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth.sys, "platform", "win32"), \
+         mock.patch.object(mouth.subprocess, "run") as run3, \
+         mock.patch.dict(os.environ, {}, clear=True):
+        got = mouth._get_elevenlabs_key()
+    check("off mac and linux there is no store to read",
+          got == "" and not run3.called, got)
+
+    mouth._el_key_cache = None
+    with mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth.sys, "platform", "linux"), \
+         mock.patch.object(mouth.shutil, "which", return_value="/bin/secret-tool"), \
+         mock.patch.object(mouth.subprocess, "run",
+                           return_value=mock.Mock(returncode=1, stdout="")), \
+         mock.patch.dict(os.environ, {}, clear=True):
+        got = mouth._get_elevenlabs_key()
+    check("a secret-tool miss leaves no key", got == "", got)
 
     mouth._el_key_cache = None
     with mock.patch.object(mouth, "CFG", cfg), \
@@ -537,6 +579,24 @@ def espeak_render():
         check("empty stdout yields nothing",
               list(mouth._stream_espeak("hi", "en")) == [])
 
+    silent = wav([], 1)
+    with mock.patch.object(mouth, "_ESPEAK", "espeak-ng"), \
+         mock.patch.object(mouth.subprocess, "run",
+                           return_value=mock.Mock(stdout=silent)), \
+         mock.patch.object(mouth, "CFG", {"speed": 1.0}):
+        check("a zero-frame WAV yields nothing",
+              list(mouth._stream_espeak("hi", "en")) == [])
+
+    with mock.patch.object(mouth, "_ESPEAK", "espeak-ng"), \
+         mock.patch.object(mouth.subprocess, "run",
+                           return_value=mock.Mock(stdout=mono)), \
+         mock.patch.object(mouth.os, "remove",
+                           side_effect=OSError("in use")), \
+         mock.patch.object(mouth, "CFG", {"speed": 1.0}):
+        out = list(mouth._stream_espeak("hi", "en"))
+    check("audio still returned when the temp file will not delete",
+          out and out[0].tolist() == [100, -100, 200], out)
+
 
 def warm_and_kokoro():
     print("\n--- warm() / _stream_kokoro ---")
@@ -578,6 +638,16 @@ def warm_and_kokoro():
     check("kokoro audio is clipped to int16",
           chunks and chunks[0].dtype == np.int16
           and chunks[0].tolist() == [16383, -16383], chunks)
+
+    class _EmptyPipe:
+        def __call__(self, text, voice=None, speed=None):
+            yield (None, None, np.array([], dtype=np.float32))
+
+    with mock.patch.object(mouth, "warm", return_value="bm_lewis"), \
+         mock.patch.object(mouth, "_pipe", _EmptyPipe()), \
+         mock.patch.object(mouth, "CFG", {"speed": 1.0}):
+        chunks = list(mouth._stream_kokoro("hi"))
+    check("an empty kokoro chunk yields nothing", chunks == [], chunks)
 
 
 class _FloatPipe:
@@ -751,6 +821,203 @@ def playback_edges():
         m2._play_stream("Hello.")
     check("a stop landing mid-write cuts the line", bool(cut))
 
+    m3 = quiet_mouth()
+    out3 = FakeOut()
+    seen = {"n": 0}
+
+    def write3(data):
+        out3.writes.append(data)
+        seen["n"] += 1
+        if seen["n"] == 2:
+            m3._stop.set()
+
+    out3.write = write3
+    cut3 = []
+
+    def small(text, timeout=30.0):
+        yield (1000, np.ones(1000, dtype=np.int16))
+        yield (1000, np.full(1000, 2, dtype=np.int16))
+
+    m3._stop.clear()
+    with mock.patch.object(mouth, "synth_stream", side_effect=small), \
+         mock.patch.object(Mouth, "_get_out", return_value=out3), \
+         mock.patch.object(Mouth, "_cut", lambda self: cut3.append(True)), \
+         mock.patch.object(sig, "feed_waveform"), \
+         mock.patch.object(sig, "direction"), \
+         mock.patch.object(sig, "set_state"), \
+         mock.patch.object(sig, "caption"), \
+         mock.patch.object(sig, "caption_clear"), \
+         mock.patch.object(sig, "reply_done"):
+        m3._play_stream("Hello.", prebuffer_s=1.0)
+    check("a stop after the head buffer still cuts", bool(cut3))
+
+    m4 = quiet_mouth()
+    out4 = FakeOut()
+
+    def small2(text, timeout=30.0):
+        yield (1000, np.ones(1000, dtype=np.int16))
+        yield (1000, np.full(1000, 2, dtype=np.int16))
+
+    m4._stop.clear()
+    with mock.patch.object(mouth, "synth_stream", side_effect=small2), \
+         mock.patch.object(Mouth, "_get_out", return_value=out4), \
+         mock.patch.object(sig, "feed_waveform"), \
+         mock.patch.object(sig, "direction"), \
+         mock.patch.object(sig, "set_state"), \
+         mock.patch.object(sig, "caption"), \
+         mock.patch.object(sig, "caption_clear"), \
+         mock.patch.object(sig, "reply_done"):
+        m4._play_stream("Hello.", prebuffer_s=1.0)
+    check("every generated chunk plays when nothing stops it",
+          len(out4.writes) == 2, len(out4.writes))
+
+
+def elevenlabs_stream():
+    print("\n--- _stream_elevenlabs: fetch, decode, feed ---")
+
+    class FakeStdin:
+        def __init__(self, close_boom=False):
+            self.written = []
+            self.closed = False
+            self._close_boom = close_boom
+
+        def write(self, b):
+            self.written.append(b)
+
+        def close(self):
+            self.closed = True
+            if self._close_boom:
+                raise OSError("close failed")
+
+    class FakeStdout:
+        def __init__(self, data, stdin=None):
+            self._data = data
+            self._stdin = stdin
+
+        def read(self, n):
+            if not self._data:
+                for _ in range(500):
+                    if self._stdin is None or self._stdin.closed:
+                        return b""
+                    time.sleep(0.002)
+                return b""
+            chunk, self._data = self._data[:n], self._data[n:]
+            return chunk
+
+    class FakeProc:
+        def __init__(self, data, stdin=True, close_boom=False):
+            self.stdin = FakeStdin(close_boom) if stdin else None
+            self.stdout = FakeStdout(data, self.stdin) if stdin else None
+
+        def wait(self, timeout=None):
+            return 0
+
+    class FakeStream:
+        def __init__(self, chunks, fail=False):
+            self._chunks = chunks
+            self._fail = fail
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def raise_for_status(self):
+            if self._fail:
+                raise RuntimeError("http 500")
+
+        def iter_bytes(self, chunk_size=4096):
+            for c in self._chunks:
+                yield c
+
+    fake_httpx = types.ModuleType("httpx")
+    holder = {"stream": FakeStream([])}
+    fake_httpx.stream = lambda *a, **k: holder["stream"]
+
+    cfg = {"elevenlabs": {"voice_id": "v", "model": "m",
+                          "master": "atempo=1.0"},
+           "voice": "fallback"}
+    pcm_bytes = np.array([5, -5, 10], dtype=np.int16).tobytes()
+
+    holder["stream"] = FakeStream([pcm_bytes])
+    with mock.patch.dict(sys.modules, {"httpx": fake_httpx}), \
+         mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth, "_get_elevenlabs_key", return_value="k"), \
+         mock.patch.object(mouth.subprocess, "Popen",
+                           return_value=FakeProc(pcm_bytes)):
+        out = list(mouth._stream_elevenlabs("hello", 5.0))
+    check("mp3 bytes decode to int16 pcm",
+          out and out[0].tolist() == [5, -5, 10], out)
+
+    holder["stream"] = FakeStream([], fail=True)
+    with mock.patch.dict(sys.modules, {"httpx": fake_httpx}), \
+         mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth, "_get_elevenlabs_key", return_value="k"), \
+         mock.patch.object(mouth.subprocess, "Popen",
+                           return_value=FakeProc(b"")):
+        raised = False
+        try:
+            list(mouth._stream_elevenlabs("hello", 5.0))
+        except RuntimeError:
+            raised = True
+    check("a feed that failed with no audio raises", raised)
+
+    with mock.patch.dict(sys.modules, {"httpx": fake_httpx}), \
+         mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth, "_get_elevenlabs_key", return_value="k"), \
+         mock.patch.object(mouth.subprocess, "Popen",
+                           return_value=FakeProc(b"", stdin=False)):
+        check("a process with no pipes returns quietly",
+              list(mouth._stream_elevenlabs("hello", 5.0)) == [])
+
+    holder["stream"] = FakeStream([pcm_bytes])
+    with mock.patch.dict(sys.modules, {"httpx": fake_httpx}), \
+         mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth, "_get_elevenlabs_key", return_value="k"), \
+         mock.patch.object(mouth.subprocess, "Popen",
+                           return_value=FakeProc(b"\x05")):
+        check("a lone trailing byte yields no chunk",
+              list(mouth._stream_elevenlabs("hello", 5.0)) == [])
+
+    holder["stream"] = FakeStream([pcm_bytes])
+    with mock.patch.dict(sys.modules, {"httpx": fake_httpx}), \
+         mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth, "_get_elevenlabs_key", return_value="k"), \
+         mock.patch.object(mouth.subprocess, "Popen",
+                           return_value=FakeProc(pcm_bytes, close_boom=True)):
+        out = list(mouth._stream_elevenlabs("hello", 5.0))
+    check("a failing stdin.close is swallowed",
+          out and out[0].tolist() == [5, -5, 10], out)
+
+
+def worker_keeps_talking():
+    print("\n--- the worker keeps talking while the queue has more ---")
+    played = []
+
+    def play(self, s, d=None):
+        played.append(s)
+        if len(played) == 1:
+            self._q.put(("chaser.", None))
+
+    with mock.patch.object(Mouth, "_play_stream", new=play), \
+         mock.patch.object(sig, "static_stop"), \
+         mock.patch.object(sig, "set_state"), \
+         mock.patch.object(sig, "caption"), \
+         mock.patch.object(sig, "caption_clear") as cap_clear, \
+         mock.patch.object(sig, "reply_done") as reply_done, \
+         mock.patch.object(sig, "feed_waveform"), \
+         mock.patch.object(sig, "direction"):
+        m = Mouth()
+        m.say_chunk("lead.")
+        deadline = time.time() + 5
+        while not reply_done.called and time.time() < deadline:
+            time.sleep(0.01)
+        m.shut_up()
+    check("the queued follow-on played too",
+          played == ["lead.", "chaser."], played)
+    check("the bus parked only after both", cap_clear.called)
+
 
 print("=" * 66)
 print("THE MOUTH (offline, no device, no model)")
@@ -777,6 +1044,8 @@ wait_done_timeout()
 worker_edges()
 teardown_errors()
 playback_edges()
+elevenlabs_stream()
+worker_keeps_talking()
 print("\n" + "=" * 66)
 print("MOUTH OK" if not FAILURES else f"MOUTH FAILURES: {FAILURES}")
 sys.exit(1 if FAILURES else 0)
