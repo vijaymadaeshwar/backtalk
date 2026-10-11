@@ -99,7 +99,19 @@ def test_init_console_survives_a_stubborn_stream():
         def reconfigure(self, **kwargs):
             raise OSError("no")
 
+    class WorkingCtypes:
+        class windll:
+            class kernel32:
+                @staticmethod
+                def SetConsoleOutputCP(code):
+                    return 0
+
+                @staticmethod
+                def SetConsoleCP(code):
+                    return 0
+
     with mock.patch.object(vlog.sys, "platform", "win32"), \
+         mock.patch.dict(sys.modules, {"ctypes": WorkingCtypes}), \
          mock.patch.object(vlog.sys, "stdout", Boom()), \
          mock.patch.object(vlog.sys, "stderr", Boom()):
         vlog._init_console()

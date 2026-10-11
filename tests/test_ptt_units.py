@@ -146,6 +146,31 @@ def wait_press_and_is_held():
               lis2._press_evt.n == 2, lis2._press_evt.n)
 
 
+def working_backend_branch():
+    print("\n--- the module takes a working keyboard backend ---")
+    saved = sys.modules.get("pynput")
+    saved_sub = sys.modules.get("pynput.keyboard")
+    fake_pkg = types.ModuleType("pynput")
+    fake_kb = types.ModuleType("pynput.keyboard")
+    fake_pkg.keyboard = fake_kb
+    sys.modules["pynput"] = fake_pkg
+    sys.modules["pynput.keyboard"] = fake_kb
+    try:
+        reloaded = importlib.reload(ptt)
+        check("with a backend, keyboard is set", reloaded.keyboard is fake_kb)
+        check("and no error is recorded", reloaded._PTT_ERROR is None)
+    finally:
+        if saved is not None:
+            sys.modules["pynput"] = saved
+        else:
+            sys.modules.pop("pynput", None)
+        if saved_sub is not None:
+            sys.modules["pynput.keyboard"] = saved_sub
+        else:
+            sys.modules.pop("pynput.keyboard", None)
+        importlib.reload(ptt)
+
+
 def no_backend_branch():
     print("\n--- the module survives a missing keyboard backend ---")
     saved = sys.modules.get("pynput")
@@ -179,6 +204,7 @@ print("=" * 66)
 resolution()
 listener_lifecycle()
 wait_press_and_is_held()
+working_backend_branch()
 no_backend_branch()
 
 print("\n" + "=" * 66)
