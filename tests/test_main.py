@@ -983,6 +983,23 @@ class _FakeScreen:
             await asyncio.sleep(interval)
 
 
+class _QuietEars(_LoopEars):
+    """A mic that stays silent through a whole check-in window."""
+
+    def listen_once(self, gate=None, abort=None):
+        self.calls += 1
+        time.sleep(0.5)
+        return None
+
+
+class _BusyMouth(_LoopMouth):
+    """A mouth stuck 'speaking', to hold a check-in back."""
+
+    def __init__(self):
+        super().__init__()
+        self.speaking = True
+
+
 _LAST_SIGNALS = None
 
 
@@ -1398,6 +1415,53 @@ def activity_tracker():
           _LAST_SIGNALS.active_window.call_args_list)
 
 
+def check_in_decision():
+    print("\n--- check_in_due: who may speak first ---")
+    d = btmain.check_in_due
+    check("an idle, switched-on line may start talking",
+          d(True, 30, 60, False, False, False) is True)
+    check("switched off means never",
+          d(False, 30, 60, False, False, False) is False)
+    check("a zero interval means never",
+          d(True, 0, 60, False, False, False) is False)
+    check("too short a quiet is not yet",
+          d(True, 30, 10, False, False, False) is False)
+    check("a speaking mouth keeps it quiet",
+          d(True, 30, 60, True, False, False) is False)
+    check("a reply in flight keeps it quiet",
+          d(True, 30, 60, False, True, False) is False)
+    check("a pending permission ask keeps it quiet",
+          d(True, 30, 60, False, False, True) is False)
+
+
+def check_in():
+    print("\n--- amain: the assistant can speak first ---")
+    mouth, _, res = _run_amain(
+        ["goodbye seyon"],
+        cfg_extra={"check_in_enabled": True, "check_in_interval": 0.02},
+        ears=_QuietEars(), feed_delay=0.35)
+    check("the check-in run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("a check-in reached the brain unprompted",
+          btmain.CHECK_IN_PROMPT in brain.got, brain.got)
+    check("the check-in reply was spoken",
+          any("Answer one." in c for c in mouth.chunks), mouth.chunks)
+
+
+def check_in_defer():
+    print("\n--- amain: a busy line does not speak first ---")
+    mouth, _, res = _run_amain(
+        ["goodbye seyon"],
+        cfg_extra={"check_in_enabled": True, "check_in_interval": 0.02},
+        ears=_QuietEars(), mouth=_BusyMouth(), feed_delay=0.35)
+    check("the held-back run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("a speaking mouth holds the check-in back",
+          btmain.CHECK_IN_PROMPT not in brain.got, brain.got)
+
+
 def tty_reader():
     print("\n--- _typed_reader: the POSIX line editor ---")
     reads = iter([
@@ -1609,6 +1673,9 @@ single_instance()
 amain_loop()
 screen_look()
 activity_tracker()
+check_in_decision()
+check_in()
+check_in_defer()
 tty_reader()
 tty_reader_branches()
 main_entry()

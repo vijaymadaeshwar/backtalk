@@ -765,6 +765,27 @@ async def speak_look(brain: WarmBrain, mouth: Mouth, on_reply=None):
     await speak_reply(brain, mouth, LOOK_PROMPT, on_reply=on_reply, image=png)
 
 
+CHECK_IN_PROMPT = (
+    "The person has gone quiet for a while. Start the conversation "
+    "yourself with one or two short, warm, natural sentences in your own "
+    "voice -- a friendly hello, a small thought, or an offer to help with "
+    "what they were doing. Do not ask them to confirm anything, and never "
+    "say that you were waiting or counting the time.")
+
+
+def check_in_due(enabled, interval, idle, speaking, replying, asking):
+    """True when the assistant should start a conversation of its own.
+
+    A check-in is the one thing here that talks FIRST, so it is fenced on
+    every side: it must be switched on, the quiet must have lasted a whole
+    interval, and nothing may be in flight -- not the mouth (the person is
+    hearing an answer), not a reply task, and not a permission ask waiting
+    on an answer. Kept a pure function so each fence is a plain yes/no.
+    """
+    return (bool(enabled) and interval > 0 and idle >= interval
+            and not speaking and not replying and not asking)
+
+
 async def journal_flush(journal: Journal, brain: WarmBrain):
     """Write the session down, then get out of the way.
 
@@ -924,6 +945,18 @@ async def amain():
 
         tracker = asyncio.create_task(_track_activity())
 
+        tracker = asyncio.create_task(_track_activity())
+
+    # Check-in cadence. The assistant may start the conversation itself
+    # after a full quiet interval, but only when switched on; 0 (or less)
+    # disables it even then, and off is the shipped default. _ACTIVITY is
+    # the shared quiet-clock: every real turn moves it, and the main wait
+    # below measures from it.
+    check_interval = float(CFG.get("check_in_interval", 0) or 0)
+    if not CFG.get("check_in_enabled"):
+        check_interval = 0.0
+    _ACTIVITY = {"at": time.monotonic()}
+
     async def run_console(verb):
         """One voice-console verb. The current reply was already
         cancelled and awaited by handle(); the pipe gets drained here
@@ -1062,6 +1095,7 @@ async def amain():
         when the utterance STARTED (the PTT press), so an answer can be
         told apart from speech that began before the ask even existed."""
         nonlocal speak_task
+        _ACTIVITY["at"] = time.monotonic()
         log(f"[you]    {text}")
         # ENGLISH ONLY. The ear keeps hearing whatever the room says --
         # Tamil, Hindi, anything -- but this assistant answers in
@@ -1157,6 +1191,20 @@ async def amain():
                 speak_reply(brain, mouth, text, on_reply=journal.say_agent))
         return True
 
+    async def _do_check_in():
+        """Speak one line the assistant starts itself. The bus is lit and
+        the brain's turn reset exactly as a normal turn's would be, but no
+        user utterance is recorded -- nothing was said to it."""
+        nonlocal speak_task
+        log("[check-in] speaking first after a quiet spell")
+        signals.set_state("thinking")
+        signals.static_start()
+        _deny_pending()
+        await brain.reset_turn()
+        speak_task = asyncio.create_task(
+            speak_reply(brain, mouth, CHECK_IN_PROMPT,
+                        on_reply=journal.say_agent))
+
     try:
         # ONE loop, two mic modes, switchable live (_MIC). The talk key
         # is constructed and honored in BOTH modes: in hands-free
@@ -1222,8 +1270,30 @@ async def amain():
                     mic_fut = loop.run_in_executor(
                         _BLOCKERS, lambda g=g: capture_open(g))
                 waiters.add(mic_fut)
+            # Check-ins ride this same wait: when the feature is on, cap
+            # the wait at the quiet time remaining so the loop wakes to
+            # consider starting a conversation. The floor keeps that
+            # wake-up sane once the window has already elapsed.
+            timeout = None
+            if check_interval:
+                timeout = max(0.1, check_interval
+                              - (time.monotonic() - _ACTIVITY["at"]))
             done, _ = await asyncio.wait(
-                waiters, return_when=asyncio.FIRST_COMPLETED)
+                waiters, return_when=asyncio.FIRST_COMPLETED,
+                timeout=timeout)
+            if not done:
+                # The wait timed out with nothing said. Reset the clock
+                # either way, then speak only if nothing is in flight --
+                # otherwise this was a busy moment and it stays quiet.
+                idle = time.monotonic() - _ACTIVITY["at"]
+                _ACTIVITY["at"] = time.monotonic()
+                if check_in_due(
+                        CFG.get("check_in_enabled"), check_interval, idle,
+                        mouth.speaking,
+                        bool(speak_task and not speak_task.done()),
+                        _PERM["fut"] is not None and not _PERM["fut"].done()):
+                    await _do_check_in()
+                continue
             if typed_fut in done:
                 text = typed_fut.result(); typed_fut = None
                 if text and not await handle(text):

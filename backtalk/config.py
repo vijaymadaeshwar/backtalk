@@ -110,6 +110,16 @@ DEFAULTS = {
     # interval to 0 to turn the periodic sampling off while keeping the look.
     "screen_enabled": False,
     "screen_track_interval": 30.0,
+    # Check-ins: the assistant starting the conversation itself. OFF by
+    # default, and off is the honest default -- a voice line that talks when
+    # nobody asked should be something you turned on, never a surprise.
+    #
+    # When on, after a full check_in_interval of quiet (no turn from you, no
+    # reply in flight) it may say one short line of its own. It never talks
+    # over a live turn, and any input from you resets the clock: it is a
+    # companion's "still here?" between silences, not a timer that interrupts.
+    "check_in_enabled": False,
+    "check_in_interval": 900.0,
     # The opencode HTTP server backtalk talks to. It starts its own on
     # this port if nothing is listening, and REUSES a running server if
     # something already is — so starting opencode yourself first is fine
