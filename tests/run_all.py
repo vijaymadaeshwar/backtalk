@@ -78,9 +78,21 @@ def main(argv: list[str]) -> int:
         print("=" * 66)
         rep = subprocess.run(
             [sys.executable, "-m", "coverage", "report",
-             f"--fail-under={COVERAGE_FLOOR}"], env=env)
+             "--show-missing",
+             f"--fail-under={COVERAGE_FLOOR}"],
+            env=env, capture_output=True, text=True)
+        sys.stdout.write(rep.stdout)
+        sys.stderr.write(rep.stderr)
         if rep.returncode != 0:
             failed.append(f"coverage<{COVERAGE_FLOOR}%")
+            # Surface the shortfall as GitHub annotations: a failing
+            # report scrolls past in the job log, but annotations are
+            # readable straight off the run. Guarded so a local run
+            # stays plain text.
+            if os.environ.get("GITHUB_ACTIONS"):
+                for line in rep.stdout.splitlines():
+                    if "backtalk" in line or line.startswith("TOTAL"):
+                        print(f"::error::{line.rstrip()}")
     if failed:
         print("FAILED: " + ", ".join(failed))
         return 1
