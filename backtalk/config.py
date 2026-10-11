@@ -97,6 +97,19 @@ DEFAULTS = {
     # real session, wasted on a two-line one, and always bounded -- if the
     # brain is slow the entry is still written, just with less in it.
     "journal_summary": True,
+    # Screen awareness, in two halves. OFF by default; both are opt-in.
+    #
+    # screen_enabled: sample which app/window is focused every
+    # screen_track_interval seconds and record the LABEL in the session
+    # journal (and on the signal bus, so a face can show it). Local only --
+    # a line of text like "code.exe -- main.py", never a picture.
+    #
+    # The spoken "look at my screen" command works regardless of this flag:
+    # it only ever fires when you say it, and sends ONE screenshot to your
+    # own brain so it can answer about what is on the display. Set the
+    # interval to 0 to turn the periodic sampling off while keeping the look.
+    "screen_enabled": False,
+    "screen_track_interval": 30.0,
     # The opencode HTTP server backtalk talks to. It starts its own on
     # this port if nothing is listening, and REUSES a running server if
     # something already is — so starting opencode yourself first is fine

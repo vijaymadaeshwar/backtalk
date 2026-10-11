@@ -71,7 +71,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from backtalk import signals
+from backtalk import screen, signals
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
@@ -326,6 +326,11 @@ CONSOLE_VERBS = {
     "fast":      ("switch to the fast model", "use the fast model",
                   "back to the fast model", "slash model fast"),
     "usage":     ("usage report", "slash usage"),
+    "look":      ("look at my screen", "look at the screen",
+                  "look at my display", "look at the display",
+                  "what is on my screen", "what's on my screen",
+                  "what is on the screen", "read my screen",
+                  "describe my screen", "look at this", "look at that"),
     "micopen":   ("go hands free", "hands free mode",
                   "hands free listening", "open mic", "open the mic"),
     "micptt":    ("push to talk", "push to talk mode",
@@ -598,7 +603,7 @@ def _typed_reader(q: "queue.Queue[str]"):
 
 
 async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str,
-                      on_reply=None):
+                      on_reply=None, image: bytes | None = None):
     """First sentence ships alone (fast start); the rest go in
     2-sentence breaths — fuller chunks get livelier prosody (single
     short sentences come out flat).
@@ -662,7 +667,11 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str,
                 batch = []
 
     try:
-        async for sentence in brain.ask_stream(text):
+        # A screen image only rides the first (and only) turn; passing it
+        # only when present keeps every other caller's brain untouched.
+        stream = (brain.ask_stream(text, image=image) if image is not None
+                  else brain.ask_stream(text))
+        async for sentence in stream:
             emit(sentence)
         if batch:
             tail = " ".join(batch)
@@ -728,6 +737,32 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str,
             signals.caption_clear()
             mouth.say("I could not reach my side of that one. "
                       "Ask me again and I will try once more.")
+
+
+LOOK_PROMPT = (
+    "The attached image is a screenshot of my screen, taken just now. "
+    "Tell me what is on it in a few sentences, and point out anything "
+    "worth noticing. If I asked about something specific, answer that "
+    "about the image. If the image is unreadable or blank, say so "
+    "plainly rather than guessing.")
+
+
+async def speak_look(brain: WarmBrain, mouth: Mouth, on_reply=None):
+    """Answer a question about the screen: one screenshot, one spoken turn.
+
+    A capture failure is spoken, never raised -- the voice line has to
+    survive a machine with no display. The bus is parked on that path
+    because handle() already lit it up for a turn that now is not coming.
+    """
+    try:
+        png = screen.capture()
+    except RuntimeError as e:
+        log(f"[screen] look unavailable: {e}")
+        signals.static_stop()
+        signals.set_state("idle")
+        mouth.say("I can't see your screen on this machine.")
+        return
+    await speak_reply(brain, mouth, LOOK_PROMPT, on_reply=on_reply, image=png)
 
 
 async def journal_flush(journal: Journal, brain: WarmBrain):
@@ -871,6 +906,23 @@ async def amain():
     typed_q: "queue.Queue[str]" = queue.Queue()
     threading.Thread(target=_typed_reader, args=(typed_q,), daemon=True).start()
     typed_fut: asyncio.Future | None = None
+
+    # The activity tracker: a quiet, local note of which window is
+    # focused, sampled every screen_track_interval and recorded in the
+    # session journal. Off unless screen_enabled; an interval of 0 (or
+    # less) means "no periodic sampling", so the spoken look still works
+    # while nothing is watched in the background.
+    track_interval = float(CFG.get("screen_track_interval") or 0)
+    tracker: asyncio.Task | None = None
+    if CFG.get("screen_enabled") and track_interval > 0:
+        def _note_activity(label):
+            journal.say_activity(label)
+            signals.active_window(label)
+
+        async def _track_activity():
+            await screen.watch(track_interval, _note_activity)
+
+        tracker = asyncio.create_task(_track_activity())
 
     async def run_console(verb):
         """One voice-console verb. The current reply was already
@@ -1080,7 +1132,7 @@ async def amain():
                 pass
             speak_task = None
         verb = verb or console_match(text)
-        if verb:
+        if verb and verb != "look":
             await run_console(verb)
             return True
         signals.set_state("thinking")
@@ -1095,8 +1147,14 @@ async def amain():
         # answer and a console command are machinery, not conversation, and a
         # journal full of "/status" is a journal nobody reads.
         journal.say_user(text)
-        speak_task = asyncio.create_task(
-            speak_reply(brain, mouth, text, on_reply=journal.say_agent))
+        # "look" is a real turn, not a console verb: it has to reach the
+        # brain, with a screenshot attached, and come back as an answer.
+        if verb == "look":
+            speak_task = asyncio.create_task(
+                speak_look(brain, mouth, on_reply=journal.say_agent))
+        else:
+            speak_task = asyncio.create_task(
+                speak_reply(brain, mouth, text, on_reply=journal.say_agent))
         return True
 
     try:
@@ -1244,7 +1302,9 @@ async def amain():
     except KeyboardInterrupt:
         pass
     finally:
-        _MIC["gen"] += 1     # abort any live open-mic capture promptly
+        _MIC["gen"] += 1     # abort any live open-mic capture right away
+        if tracker and not tracker.done():
+            tracker.cancel()
         if speak_task and not speak_task.done():
             speak_task.cancel()
         mouth.shutdown()  # restores the music on Ctrl-C / crash paths too

@@ -18,6 +18,7 @@ Transport: opencode's local HTTP server (`opencode serve`). The server is
 started on demand if it isn't already running, and reused if it is.
 """
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -457,8 +458,14 @@ class WarmBrain:
             log(f"[live] lookup failed, answering without it: {e!r}")
             return ""
 
-    async def ask_stream(self, utterance: str):
-        """Yield complete sentences as opencode streams them."""
+    async def ask_stream(self, utterance: str, image: bytes | None = None):
+        """Yield complete sentences as opencode streams them.
+
+        image, when given, is a PNG of the user's screen: it rides along
+        as a file part so a vision model can answer about what is really
+        on the display. A current screenshot is already the freshest fact
+        there is, so the live-data lookup is skipped when one is sent.
+        """
         srv, sid = self._srv, self._sid
         if not srv or not sid:
             log("[brain] ask_stream with no session")
@@ -474,10 +481,19 @@ class WarmBrain:
         if self._variant:
             body["variant"] = self._variant
 
-        live = await self._live(utterance)
-        if live:
-            body["parts"].insert(0, {"type": "text", "text": live})
-            log(f"[live] fetched fresh facts for {utterance[:48]!r}")
+        if image is not None:
+            body["parts"].append({
+                "type": "file",
+                "mime": "image/png",
+                "filename": "screen.png",
+                "url": "data:image/png;base64,"
+                       + base64.b64encode(image).decode("ascii"),
+            })
+        else:
+            live = await self._live(utterance)
+            if live:
+                body["parts"].insert(0, {"type": "text", "text": live})
+                log(f"[live] fetched fresh facts for {utterance[:48]!r}")
 
         self._dirty = True
         try:

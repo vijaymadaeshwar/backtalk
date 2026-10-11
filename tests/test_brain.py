@@ -832,6 +832,39 @@ async def scenario_live_fetch():
         brain._Server = saved
 
 
+async def scenario_image_part():
+    fake, b, saved = await new_brain()
+    old_live = CFG.get("live_data")
+    old_wants = brain.live.wants_live
+    try:
+        CFG["live_data"] = True
+        brain.live.wants_live = lambda u: True
+        sid = b._sid
+        fake.events = [{"type": "session.idle",
+                        "properties": {"sessionID": sid}}]
+        await _drain(b.ask_stream("what is on my screen?", image=b"\x89PNG"))
+        prompt = [body for m, p, body in fake.requests
+                  if "prompt_async" in p][-1]
+        parts = prompt["parts"]
+        check("the question and the screenshot both ride along",
+              parts[0]["text"] == "what is on my screen?" and len(parts) == 2,
+              parts)
+        fpart = parts[1]
+        check("the screenshot is a png data url",
+              fpart["type"] == "file"
+              and fpart["mime"] == "image/png"
+              and fpart["filename"] == "screen.png"
+              and fpart["url"].startswith("data:image/png;base64,"), fpart)
+        check("a screenshot skips the live lookup",
+              all(p.get("type") != "text"
+                  or p["text"] != "Fresh facts for you." for p in parts),
+              parts)
+    finally:
+        CFG["live_data"] = old_live
+        brain.live.wants_live = old_wants
+        brain._Server = saved
+
+
 async def scenario_stream_edges():
     fake, b, saved = await new_brain()
     try:
@@ -987,6 +1020,7 @@ async def main():
     await scenario_command_edges()
     await scenario_body_fields()
     await scenario_live_fetch()
+    await scenario_image_part()
     await scenario_stream_edges()
     await scenario_permission_edges()
     await scenario_real_server()

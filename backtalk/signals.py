@@ -285,3 +285,20 @@ def caption_clear():
         os.remove(_CAPTION_FILE)
     except OSError:
         pass
+
+
+_ACTIVE_FILE = os.path.join(_DIR, ".voice_active_window")
+
+
+def active_window(text: str):
+    """What the activity tracker last saw focused, for a face to show.
+
+    Local only and never raises: a display is a courtesy, not something
+    the voice line should ever fail over. The reader treats a stale
+    timestamp as "unknown", so there is nothing to clear.
+    """
+    try:
+        with open(_ACTIVE_FILE, "w") as f:
+            f.write(json.dumps({"ts": time.time(), "text": text or ""}))
+    except OSError:
+        pass

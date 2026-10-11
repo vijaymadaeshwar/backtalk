@@ -67,6 +67,12 @@ def console():
           btmain.console_match("Compact Context!") == "compact")
     check("hyphens fold to spaces",
           btmain.console_match("hands-free mode") == "micopen")
+    check("a spoken look matches",
+          btmain.console_match("look at my screen") == "look")
+    check("look ignores case and punctuation",
+          btmain.console_match("What's on my screen?") == "look")
+    check("talking ABOUT a screen is not a look",
+          btmain.console_match("the screen is too bright") is None)
     check("an effort level matches",
           btmain.console_match("set effort to high") == "effort:high")
     check("a bare effort word matches",
@@ -715,15 +721,21 @@ class _LoopEars:
 
 
 class _LoopJournal:
+    instances = []
+
     def __init__(self, *a, **k):
         self.active = False
         self.events = []
+        _LoopJournal.instances.append(self)
 
     def say_user(self, t):
         pass
 
     def say_agent(self, t):
         pass
+
+    def say_activity(self, t):
+        self.events.append(("activity", t))
 
 
 class _LoopBrain:
@@ -767,6 +779,21 @@ class _LoopBrain:
         self.got.append(text)
         yield "Answer one."
         yield "Answer two."
+
+
+class _LookBrain(_LoopBrain):
+    """Accepts the optional screenshot a spoken look sends the brain."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.images = []
+
+    async def ask_stream(self, text, image=None):
+        if text.startswith("Warmup ping"):
+            return
+        self.got.append(text)
+        self.images.append(image)
+        yield "That is your editor."
 
 
 class _DeadBrain(_LoopBrain):
@@ -933,9 +960,36 @@ def _noop_record(is_held, on_release=None):
     return ""
 
 
+class _FakeScreen:
+    """Stands in for backtalk.screen: a canned capture and a stub watch."""
+
+    def __init__(self, png=b"PNG", raises=None,
+                 changes=("code.exe \u2014 main.py",)):
+        self._png = png
+        self._raises = raises
+        self.changes = list(changes)
+        self.watched = []
+
+    def capture(self):
+        if self._raises is not None:
+            raise self._raises
+        return self._png
+
+    async def watch(self, interval, on_change):
+        self.watched.append(interval)
+        for change in self.changes:
+            on_change(change)
+        while True:
+            await asyncio.sleep(interval)
+
+
+_LAST_SIGNALS = None
+
+
 def _run_amain(feed, cfg_extra=None, argv=(), brain_cls=_LoopBrain,
                ears=None, mouth=None, ptt=None, record=None,
-               feed_delay=0.0, explain=None):
+               feed_delay=0.0, explain=None, screen=None):
+    global _LAST_SIGNALS
     cfg = {
         "agent_dir": "C:/agent", "model": "fast-model",
         "deep_model": "deep-model", "greeting": "Hello.",
@@ -989,6 +1043,9 @@ def _run_amain(feed, cfg_extra=None, argv=(), brain_cls=_LoopBrain,
             result["timeout"] = True
 
     result = {"exit": None, "timeout": False}
+    screen = screen or _FakeScreen()
+    sig = mock.Mock()
+    _LAST_SIGNALS = sig
     with mock.patch.object(btmain, "CFG", cfg), \
          mock.patch.object(btmain, "Mouth", lambda: mouth), \
          mock.patch.object(btmain, "Ears", lambda: ears), \
@@ -1004,7 +1061,8 @@ def _run_amain(feed, cfg_extra=None, argv=(), brain_cls=_LoopBrain,
          mock.patch.object(btmain, "_write_config_key",
                            lambda k, v: True), \
          mock.patch.object(btmain, "QUIT_PHRASES", {"goodbye seyon"}), \
-         mock.patch.object(btmain, "signals"), \
+         mock.patch.object(btmain, "signals", sig), \
+         mock.patch.object(btmain, "screen", screen), \
          mock.patch.object(btmain, "log"), \
          ptt_patch, record_patch, \
          mock.patch.object(btmain.sys, "argv", ["prog", *argv]):
@@ -1298,6 +1356,48 @@ def amain_loop():
           res_mg["exit"] is None and not res_mg["timeout"], res_mg)
 
 
+def screen_look():
+    print("\n--- amain: the spoken look sends one screenshot ---")
+    mouth, _, res = _run_amain(
+        ["look at my screen", "goodbye seyon"], brain_cls=_LookBrain)
+    check("the look run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LookBrain.instances[-1]
+    check("the screenshot reached the brain",
+          brain.images == [b"PNG"], brain.images)
+    check("the answer about the screen is spoken",
+          any("That is your editor." in c for c in mouth.chunks), mouth.chunks)
+
+    mouth2, _, res2 = _run_amain(
+        ["look at my screen", "goodbye seyon"], brain_cls=_LookBrain,
+        screen=_FakeScreen(raises=RuntimeError("no display")))
+    check("a look with no display fails cleanly",
+          res2["exit"] is None and not res2["timeout"], res2)
+    check("and says it cannot see",
+          any("can't see your screen" in s for s in mouth2.said), mouth2.said)
+
+
+def activity_tracker():
+    print("\n--- amain: the activity tracker notes the focused window ---")
+    _LoopJournal.instances.clear()
+    mouth, _, res = _run_amain(
+        ["goodbye seyon"],
+        cfg_extra={"screen_enabled": True, "screen_track_interval": 0.02},
+        screen=_FakeScreen(changes=("code.exe \u2014 main.py",)))
+    check("the tracker run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    journal = _LoopJournal.instances[-1]
+    check("the focused window was journaled",
+          ("activity", "code.exe \u2014 main.py") in journal.events,
+          journal.events)
+    check("the sampling interval came from config",
+          _LAST_SIGNALS.active_window.called, _LAST_SIGNALS.mock_calls)
+    check("the label also went on the signal bus",
+          mock.call("code.exe \u2014 main.py")
+          in _LAST_SIGNALS.active_window.call_args_list,
+          _LAST_SIGNALS.active_window.call_args_list)
+
+
 def tty_reader():
     print("\n--- _typed_reader: the POSIX line editor ---")
     reads = iter([
@@ -1507,6 +1607,8 @@ gate_helpers()
 journal_flush_case()
 single_instance()
 amain_loop()
+screen_look()
+activity_tracker()
 tty_reader()
 tty_reader_branches()
 main_entry()

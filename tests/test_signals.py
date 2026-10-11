@@ -59,6 +59,14 @@ signals.caption_clear()
 check("caption_clear removes the file",
       not os.path.exists(os.path.join(_TMP, ".voice_caption")))
 
+signals.active_window("code.exe \u2014 main.py")
+aw = json.loads(read(os.path.join(_TMP, ".voice_active_window")))
+check("active window carries the label",
+      aw["text"] == "code.exe \u2014 main.py" and "ts" in aw, aw)
+signals.active_window("")
+check("an empty label is written as an empty string",
+      json.loads(read(os.path.join(_TMP, ".voice_active_window")))["text"] == "")
+
 signals.language("en")
 check("language is written",
       json.loads(read(os.path.join(_TMP, ".voice_language")))["language"] == "en")
@@ -117,7 +125,9 @@ with mock.patch.object(signals, "_STATE_FILE", _TMP), \
      mock.patch.object(signals, "_RATE_LIMIT_FILE", _TMP), \
      mock.patch.object(signals, "_WAVEFORM_FILE", _TMP), \
      mock.patch.object(signals, "_BH_WAVE", _TMP), \
-     mock.patch.object(signals, "_CAPTION_FILE", _TMP):
+     mock.patch.object(signals, "_BH_WAVE", _TMP), \
+     mock.patch.object(signals, "_CAPTION_FILE", _TMP), \
+     mock.patch.object(signals, "_ACTIVE_FILE", _TMP):
     signals.set_state("x")
     signals.direction(["<<a>>"])
     signals.language("en")
@@ -127,6 +137,7 @@ with mock.patch.object(signals, "_STATE_FILE", _TMP), \
     signals.feed_waveform(pcm)
     signals.caption("x")
     signals.caption_clear()
+    signals.active_window("x")
 check("an unwritable bus path never raises", True)
 
 with mock.patch.object(signals, "_BH_STATE", ""):

@@ -24,6 +24,7 @@ dependencies = [
     # -> 0.12s on an M4 Max with an identical transcript. Every other
     # platform keeps faster-whisper, which already uses CUDA.
     "mlx-whisper>=0.4.0 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mss>=10.2.0",
     "numpy>=1.26.0",
     "pynput>=1.8.0",
     "setuptools<81",

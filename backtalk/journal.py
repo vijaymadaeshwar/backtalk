@@ -81,6 +81,15 @@ class Journal:
     def say_agent(self, text: str) -> None:
         self._add("agent", text)
 
+    def say_activity(self, text: str) -> None:
+        """A line about what was on screen, not something anyone said.
+
+        Kept as its own role so a reader can tell the two apart: the
+        transcript stays a conversation and the activity is clearly the
+        machine's own note, not a turn the user took.
+        """
+        self._add("activity", text)
+
     def _add(self, role: str, text: str) -> None:
         if not self.active:
             return
@@ -92,9 +101,13 @@ class Journal:
         self.events.append((role, text[:MAX_CHARS]))
 
     def transcript(self) -> str:
-        return "\n".join(
-            "%s: %s" % ("you" if r == "user" else self.agent_name.lower(), t)
-            for r, t in self.events)
+        def who(role: str) -> str:
+            if role == "user":
+                return "you"
+            if role == "activity":
+                return "activity"
+            return self.agent_name.lower()
+        return "\n".join("%s: %s" % (who(r), t) for r, t in self.events)
 
     def render(self, summary: str = "") -> str:
         """The markdown body. Separate from writing so it can be tested."""
@@ -114,7 +127,8 @@ class Journal:
             lines += ["## What happened", "", summary.strip(), ""]
         lines += ["## Transcript", ""]
         for role, text in self.events:
-            who = "you" if role == "user" else self.agent_name
+            who = {"user": "you",
+                   "activity": "activity"}.get(role, self.agent_name)
             lines.append("**%s:** %s" % (who, text))
         lines += ["", "<!-- written by backtalk; edit freely, it is yours -->",
                   ""]

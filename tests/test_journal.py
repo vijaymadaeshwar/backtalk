@@ -167,6 +167,24 @@ def test_entry_without_summary_is_still_useful():
         check("no empty summary section", "## What happened" not in body)
 
 
+def test_activity_is_its_own_role():
+    print("\n--- the activity tracker's notes are their own role ---")
+    with tempfile.TemporaryDirectory() as d:
+        j = Journal(d, agent_name="Seyon")
+        j.say_user("open notepad")
+        j.say_agent("Opening it now.")
+        j.say_activity("notepad.exe \u2014 notes.txt")
+        check("the transcript shows the activity line",
+              "activity: notepad.exe" in j.transcript(), j.transcript())
+        check("activity is not counted as a turn", j.turns == 1, j.turns)
+        body = j.render()
+        check("render marks the activity as its own role",
+              "**activity:** notepad.exe" in body, body)
+        check("render keeps the conversation",
+              "**you:** open notepad" in body
+              and "**Seyon:** Opening it now." in body, body)
+
+
 print("=" * 66)
 print("SESSION JOURNAL")
 print("=" * 66)
@@ -181,6 +199,7 @@ test_unwritable_directory_does_not_raise()
 test_summary_from_a_fake_brain()
 test_summary_survives_a_broken_brain()
 test_entry_without_summary_is_still_useful()
+test_activity_is_its_own_role()
 
 print("\n" + "=" * 66)
 print("JOURNAL OK" if not FAILURES else "JOURNAL FAILURES: %s" % FAILURES)
