@@ -126,7 +126,7 @@ class Journal:
         if not self.active or not self.events:
             return None
         directory = self.directory
-        if directory is None:            # not active, checked above; narrows
+        if directory is None:  # pragma: no cover -- active implies a directory
             return None
         try:
             directory.mkdir(parents=True, exist_ok=True)

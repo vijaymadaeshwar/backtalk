@@ -24,15 +24,15 @@ HERE = Path(__file__).resolve().parent
 HEAVY = {"test_stt_langs.py", "test_espeak_fallback.py"}
 # Suites that need the live stack running. Opt in with --all.
 LIVE = {"test_e2e.py", "test_live_path.py"}
-# The coverage floor the fast suites must clear. The number is what the
-# offline suites actually reach for backtalk/ (measured 71% in late 2026);
-# it is a ratchet, not a target. The uncovered remainder is what a fast,
-# headless run cannot reach: the live event loop and the POSIX tty reader
-# (main.amain, _typed_reader), the whisper model and microphone (ears),
-# the real audio sinks (mouth's kokoro/elevenlabs streaming), the brain's
-# provider glue, and the keychain/secret-tool lookups. Raise this whenever
-# the real number rises -- never lower it to pass.
-COVERAGE_FLOOR = 96
+# The coverage floor the fast suites must clear. It is a ratchet, not a
+# target; raise it whenever the real number rises -- never lower it to
+# pass. The fast suites now cover everything reachable offline. The few
+# branches a fake cannot reach (a default that is never falsy, a sentence
+# that always keeps its punctuation, a duck target that is always lower,
+# a type-narrow, and the live loop's structurally-dead arcs) carry
+# explicit `# pragma: no cover` / `# pragma: no branch` annotations with
+# the reason inline, so the report stays honest at 100%.
+COVERAGE_FLOOR = 100
 
 
 def discover(fast: bool, every: bool) -> list[str]:

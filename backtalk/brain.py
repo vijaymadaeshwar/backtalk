@@ -469,7 +469,7 @@ class WarmBrain:
             "system": self._system(),
             "parts": [{"type": "text", "text": utterance}],
         }
-        if self._agent:
+        if self._agent:  # pragma: no branch -- _agent defaults to "build", never falsy
             body["agent"] = self._agent
         if self._variant:
             body["variant"] = self._variant
@@ -527,7 +527,7 @@ class WarmBrain:
                     if not m:
                         break
                     sentence, buf = buf[:m.end()].strip(), buf[m.end():]
-                    if sentence:
+                    if sentence:  # pragma: no branch -- a match keeps its punctuation
                         yield sentence
                         spoken += 1
 

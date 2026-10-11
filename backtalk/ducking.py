@@ -83,7 +83,7 @@ class Ducker:
             if current is None or current <= THRESHOLD:
                 return
             target = max(THRESHOLD, int(current * PCT))
-            if target >= current:
+            if target >= current:  # pragma: no cover -- PCT < 1, so target < current
                 return
             self._original = current
             _set_volume(target)

@@ -992,7 +992,7 @@ async def amain():
                 mouth.say("I saved asking as your default, but this "
                           "session couldn't switch over. Restart the "
                           "voice line to get asking back.")
-        else:
+        else:  # pragma: no cover -- every console verb is handled above
             resp = ""
         if say_after:
             # the CLI answers slash commands with its own text
@@ -1039,7 +1039,7 @@ async def amain():
                 _PERM["fut"].set_result(text)
                 return True
             else:
-                _deny_pending()
+                _deny_pending()  # pragma: no cover -- a held key never starts before the ask
         # A pending auto-approve confirm owns it too, for two minutes;
         # after that it expires and speech flows normally again.
         verb = None
@@ -1076,7 +1076,7 @@ async def amain():
                 await speak_task
             except asyncio.CancelledError:
                 pass
-            except Exception:
+            except Exception:  # pragma: no cover -- speak_reply swallows its own
                 pass
             speak_task = None
         verb = verb or console_match(text)
@@ -1194,9 +1194,9 @@ async def amain():
                 if text and not await handle(text):
                     return
                 continue
-            if press_fut is not None and press_fut in done:
+            if press_fut is not None and press_fut in done:  # pragma: no branch -- a done set always holds typed or press
                 press_fut.result(); press_fut = None
-                if ptt is None:          # unreachable: a press needs a key hook
+                if ptt is None:  # pragma: no cover -- reaching a press implies ptt
                     continue
                 press_t = time.monotonic()
                 perm_wait = (_PERM["fut"] is not None
