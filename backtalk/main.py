@@ -62,6 +62,7 @@ import asyncio
 import json
 import os
 import queue
+import random
 import re
 import socket
 import sys
@@ -146,11 +147,12 @@ _CHAIN_MARKS = ("&&", "||", ";", "|", "$(", "`", "\n")
 
 
 def _norm_speech(text):
-    """Lowercase, every non-letter to space, collapse. Whisper loves
-    interior commas ("yes, confirm"); end-stripping alone misses them."""
+    """Lowercase, every non-letter but digits to space, collapse. Whisper
+    loves interior commas ("yes, confirm"); end-stripping alone misses
+    them. Digits survive so "quiet for 20 minutes" can still be read."""
     out = []
     for ch in text.lower():
-        out.append(ch if "a" <= ch <= "z" else " ")
+        out.append(ch if "a" <= ch <= "z" or "0" <= ch <= "9" else " ")
     return " ".join("".join(out).split())
 
 
@@ -773,17 +775,114 @@ CHECK_IN_PROMPT = (
     "say that you were waiting or counting the time.")
 
 
-def check_in_due(enabled, interval, idle, speaking, replying, asking):
+def check_in_due(enabled, interval, idle, speaking, replying, asking,
+                 paused=False, quiet=False, held=False):
     """True when the assistant should start a conversation of its own.
 
     A check-in is the one thing here that talks FIRST, so it is fenced on
     every side: it must be switched on, the quiet must have lasted a whole
     interval, and nothing may be in flight -- not the mouth (the person is
     hearing an answer), not a reply task, and not a permission ask waiting
-    on an answer. Kept a pure function so each fence is a plain yes/no.
+    on an answer. On top of that the person can pause it, the clock can be
+    in their quiet hours, and the focused app can be one that holds it.
+    Kept a pure function so each fence is a plain yes/no.
     """
     return (bool(enabled) and interval > 0 and idle >= interval
+            and not paused and not quiet and not held
             and not speaking and not replying and not asking)
+
+
+def in_quiet_hours(hour, start, end):
+    """True when a 24-hour `hour` falls inside [start, end), wrapping past
+    midnight (start 23, end 7 covers late night through early morning). An
+    empty or equal window is never quiet."""
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def held_by_app(label, holds):
+    """True when a focused-window label contains any of the hold terms,
+    case-insensitively. No terms means never held."""
+    low = (label or "").lower()
+    return bool(low) and any(h.lower() in low for h in holds or ())
+
+
+# The spoken phrases that silence check-ins for a stretch, and the ones that
+# bring them back. Kept as starts-with matches so "quiet for twenty minutes"
+# and "let me work for a bit" both land, without a phrase for every wording.
+_QUIET_ON = (
+    "stay quiet", "be quiet", "quiet for", "quiet please",
+    "give me some quiet", "let me work", "leave me be",
+    "leave me alone", "don't check in", "dont check in",
+    "stop checking in", "no check ins", "pause check ins",
+)
+_QUIET_OFF = (
+    "you can check in again", "you can check in now", "check in again",
+    "start checking in again", "start checking in", "resume check ins",
+    "come check on me again", "check on me again",
+)
+# Small spoken numbers, so "quiet for twenty minutes" works without digits.
+_NUM_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "fifteen": 15,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+}
+
+
+def _quiet_seconds(norm, default):
+    """Seconds named in a "quiet" phrase, else the configured default.
+
+    Understands digits and small number words, and the two idioms people
+    actually say: "an hour" and "half an hour". Any unit it cannot read
+    falls back to the default, so "stay quiet" is always safe to say."""
+    if "half an hour" in norm or "half hour" in norm:
+        return 1800.0
+    m = re.search(r"(?:for\s+)?(\d+)\s*(second|minute|min|hour|hr)", norm)
+    if not m:
+        m = re.search(
+            r"(?:for\s+)?([a-z]+)\s*(second|minute|min|hour|hr)", norm)
+    if not m:
+        return float(default)
+    raw, unit = m.group(1), m.group(2)
+    n = int(raw) if raw.isdigit() else _NUM_WORDS.get(raw)
+    if n is None:
+        return float(default)
+    scale = 1 if unit.startswith("sec") else \
+        60 if unit.startswith(("min",)) else 3600
+    return float(n * scale)
+
+
+def checkin_control(text, default_quiet):
+    """Read a spoken check-in command. Returns ("pause", seconds) or
+    ("resume", 0) or None. Kept pure so the wording is easy to test."""
+    norm = _norm_speech(text)
+    for p in _QUIET_OFF:
+        if norm.startswith(p):
+            return ("resume", 0)
+    for p in _QUIET_ON:
+        if norm.startswith(p):
+            return ("pause", _quiet_seconds(norm, default_quiet))
+    return None
+
+
+def _spoken_quiet(secs):
+    """Ten seconds becomes "ten seconds", ninety minutes becomes "ninety
+    minutes", not "1.5 hours" -- the unit a person would actually say."""
+    secs = int(secs)
+    if secs >= 3600 and secs % 3600 == 0:
+        n, unit = secs // 3600, "hour"
+    elif secs >= 60:
+        n, unit = round(secs / 60), "minute"
+    elif secs > 0:
+        n, unit = secs, "second"
+    else:
+        return "Okay, no check-ins for now."
+    plural = "" if n == 1 else "s"
+    return (f"Quiet for {n} {unit}{plural}. I'll leave you be until then. "
+            "Say you can check in again to bring me back sooner.")
 
 
 async def journal_flush(journal: Journal, brain: WarmBrain):
@@ -934,9 +1033,11 @@ async def amain():
     # less) means "no periodic sampling", so the spoken look still works
     # while nothing is watched in the background.
     track_interval = float(CFG.get("screen_track_interval") or 0)
+    _LAST_ACTIVITY = {"label": ""}
     tracker: asyncio.Task | None = None
     if CFG.get("screen_enabled") and track_interval > 0:
         def _note_activity(label):
+            _LAST_ACTIVITY["label"] = label
             journal.say_activity(label)
             signals.active_window(label)
 
@@ -945,17 +1046,63 @@ async def amain():
 
         tracker = asyncio.create_task(_track_activity())
 
-        tracker = asyncio.create_task(_track_activity())
-
     # Check-in cadence. The assistant may start the conversation itself
     # after a full quiet interval, but only when switched on; 0 (or less)
     # disables it even then, and off is the shipped default. _ACTIVITY is
     # the shared quiet-clock: every real turn moves it, and the main wait
-    # below measures from it.
+    # below measures from it. _CHECKIN carries the live state a spoken
+    # "stay quiet" can move, and _LAST_ACTIVITY remembers what the person
+    # was last seen doing, so a check-in can be specific instead of generic.
     check_interval = float(CFG.get("check_in_interval", 0) or 0)
     if not CFG.get("check_in_enabled"):
         check_interval = 0.0
+    check_jitter = max(0.0, float(CFG.get("check_in_jitter", 0) or 0))
+    quiet_hours = CFG.get("check_in_quiet_hours") or []
+    hold_apps = list(CFG.get("check_in_hold_apps") or [])
+    quiet_default = float(CFG.get("check_in_default_quiet", 3600) or 3600)
+    followup_window = max(0.0, float(CFG.get("followup_window", 0) or 0))
     _ACTIVITY = {"at": time.monotonic()}
+    _CHECKIN = {"paused_until": 0.0}
+    _FOLLOWUP = {"until": 0.0}
+
+    def _check_in_prompt():
+        """The check-in prompt, with the last thing they were doing folded
+        in when the activity tracker has seen something. Kept short: the
+        brain has the conversation either way, this is just a nudge."""
+        label = _LAST_ACTIVITY["label"]
+        if not label:
+            return CHECK_IN_PROMPT
+        return (CHECK_IN_PROMPT + " For context, the last window you "
+                "noticed them in was " + label + ".")
+
+    def _reply_task(coro):
+        """Start the reply task and, once it is done, open the follow-up
+        window so a reply can be answered without the wake word."""
+        nonlocal speak_task
+        speak_task = asyncio.create_task(coro)
+        if followup_window:
+            speak_task.add_done_callback(_open_followup)
+
+    def _open_followup(_task):
+        # Fires whether the reply finished or was interrupted; either way
+        # the person is likely mid-thought and the next thing they say
+        # should not need the wake word.
+        _FOLLOWUP["until"] = time.monotonic() + followup_window
+
+    def _checkin_quiet():
+        """True during the configured quiet hours, by the wall clock."""
+        if len(quiet_hours) != 2:
+            return False
+        return in_quiet_hours(time.localtime().tm_hour,
+                              int(quiet_hours[0]), int(quiet_hours[1]))
+
+    def _held_now():
+        """True when the focused window matches a hold term, so the line
+        stays quiet through a meeting or a game."""
+        if not hold_apps:
+            return False
+        app, title = screen.active_window()
+        return held_by_app(" ".join(p for p in (app, title) if p), hold_apps)
 
     async def run_console(verb):
         """One voice-console verb. The current reply was already
@@ -1165,6 +1312,23 @@ async def amain():
             except Exception:  # pragma: no cover -- speak_reply swallows its own
                 pass
             speak_task = None
+        # A spoken "stay quiet" / "you can check in again" is handled here,
+        # not by the brain: it is a setting for the voice LINE, and routing
+        # it through the model would risk it being "answered" instead of
+        # obeyed. It also mutes any reply still playing, like an interrupt.
+        ctl = checkin_control(text, quiet_default)
+        if ctl is not None:
+            kind, secs = ctl
+            if kind == "pause":
+                _CHECKIN["paused_until"] = time.monotonic() + secs
+                mouth.say(_spoken_quiet(secs))
+            else:
+                _CHECKIN["paused_until"] = 0.0
+                mouth.say("Check-ins are back on. I'll look in again "
+                          "when it's been quiet.")
+            log(f"[check-in] spoken {kind}")
+            signals.set_state("idle")
+            return True
         verb = verb or console_match(text)
         if verb and verb != "look":
             await run_console(verb)
@@ -1184,10 +1348,10 @@ async def amain():
         # "look" is a real turn, not a console verb: it has to reach the
         # brain, with a screenshot attached, and come back as an answer.
         if verb == "look":
-            speak_task = asyncio.create_task(
+            _reply_task(
                 speak_look(brain, mouth, on_reply=journal.say_agent))
         else:
-            speak_task = asyncio.create_task(
+            _reply_task(
                 speak_reply(brain, mouth, text, on_reply=journal.say_agent))
         return True
 
@@ -1195,14 +1359,13 @@ async def amain():
         """Speak one line the assistant starts itself. The bus is lit and
         the brain's turn reset exactly as a normal turn's would be, but no
         user utterance is recorded -- nothing was said to it."""
-        nonlocal speak_task
         log("[check-in] speaking first after a quiet spell")
         signals.set_state("thinking")
         signals.static_start()
         _deny_pending()
         await brain.reset_turn()
-        speak_task = asyncio.create_task(
-            speak_reply(brain, mouth, CHECK_IN_PROMPT,
+        _reply_task(
+            speak_reply(brain, mouth, _check_in_prompt(),
                         on_reply=journal.say_agent))
 
     try:
@@ -1234,11 +1397,15 @@ async def amain():
             """One open-mic turn. With wake_word on, ignore everything
             until a wake phrase is heard; if the phrase carried the
             command use it, otherwise listen once more for the command.
-            wake_word only applies in open mode; PTT is always direct."""
-            if not (wake_word and _MIC["mode"] == "open"):
-                return (g, ears.listen_once(
-                    gate=mic_gate, abort=lambda: _MIC["gen"] != g))
+            wake_word only applies in open mode; PTT is always direct.
+            The follow-up window is the exception: for a few seconds after
+            a reply, speech is taken as the next thing said, no wake word,
+            so answering is a conversation rather than a summoning."""
             ab = lambda: _MIC["gen"] != g
+            if not (wake_word and _MIC["mode"] == "open"):
+                return (g, ears.listen_once(gate=mic_gate, abort=ab))
+            if time.monotonic() < _FOLLOWUP["until"]:
+                return (g, ears.listen_once(gate=mic_gate, abort=ab))
             woke = ears.wait_for_wake(wake_phrases, gate=mic_gate, abort=ab)
             if woke is None:
                 return (g, None)
@@ -1277,21 +1444,27 @@ async def amain():
             timeout = None
             if check_interval:
                 timeout = max(0.1, check_interval
-                              - (time.monotonic() - _ACTIVITY["at"]))
+                              - (time.monotonic() - _ACTIVITY["at"])
+                              + random.uniform(
+                                  0, check_jitter * check_interval))
             done, _ = await asyncio.wait(
                 waiters, return_when=asyncio.FIRST_COMPLETED,
                 timeout=timeout)
             if not done:
                 # The wait timed out with nothing said. Reset the clock
-                # either way, then speak only if nothing is in flight --
-                # otherwise this was a busy moment and it stays quiet.
+                # either way, then speak only if nothing is in flight and
+                # the person has not asked for quiet -- otherwise this was
+                # a busy moment, or a quiet one they chose, and it stays
+                # quiet.
                 idle = time.monotonic() - _ACTIVITY["at"]
                 _ACTIVITY["at"] = time.monotonic()
                 if check_in_due(
                         CFG.get("check_in_enabled"), check_interval, idle,
                         mouth.speaking,
                         bool(speak_task and not speak_task.done()),
-                        _PERM["fut"] is not None and not _PERM["fut"].done()):
+                        _PERM["fut"] is not None and not _PERM["fut"].done(),
+                        paused=time.monotonic() < _CHECKIN["paused_until"],
+                        quiet=_checkin_quiet(), held=_held_now()):
                     await _do_check_in()
                 continue
             if typed_fut in done:

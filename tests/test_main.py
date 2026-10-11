@@ -964,16 +964,27 @@ class _FakeScreen:
     """Stands in for backtalk.screen: a canned capture and a stub watch."""
 
     def __init__(self, png=b"PNG", raises=None,
-                 changes=("code.exe \u2014 main.py",)):
+                 changes=("code.exe \u2014 main.py",),
+                 window=("code.exe", "main.py"), can_see=True):
         self._png = png
         self._raises = raises
         self.changes = list(changes)
+        self.window = window
+        self.can_see = can_see
         self.watched = []
+        self.window_reads = 0
+
+    def available(self):
+        return self.can_see
 
     def capture(self):
         if self._raises is not None:
             raise self._raises
         return self._png
+
+    def active_window(self):
+        self.window_reads += 1
+        return self.window
 
     async def watch(self, interval, on_change):
         self.watched.append(interval)
@@ -998,6 +1009,26 @@ class _BusyMouth(_LoopMouth):
     def __init__(self):
         super().__init__()
         self.speaking = True
+
+
+class _FollowEars(_LoopEars):
+    """Never hears a wake phrase; returns a command on the first DIRECT
+    capture (the follow-up window after a reply), then falls silent."""
+
+    def __init__(self, text="goodbye seyon"):
+        super().__init__()
+        self.text = text
+        self.direct = 0
+
+    def wait_for_wake(self, phrases, gate=None, abort=None):
+        time.sleep(0.05)
+        return None
+
+    def listen_once(self, gate=None, abort=None):
+        self.calls += 1
+        self.direct += 1
+        time.sleep(0.05)
+        return self.text if self.direct == 1 else None
 
 
 _LAST_SIGNALS = None
@@ -1432,6 +1463,144 @@ def check_in_decision():
           d(True, 30, 60, False, True, False) is False)
     check("a pending permission ask keeps it quiet",
           d(True, 30, 60, False, False, True) is False)
+    check("a spoken pause keeps it quiet",
+          d(True, 30, 60, False, False, False, paused=True) is False)
+    check("quiet hours keep it quiet",
+          d(True, 30, 60, False, False, False, quiet=True) is False)
+    check("a held app keeps it quiet",
+          d(True, 30, 60, False, False, False, held=True) is False)
+
+
+def checkin_control_text():
+    print("\n--- checkin_control: the spoken quiet phrases ---")
+    ctl = btmain.checkin_control
+    check("a plain stay quiet uses the default",
+          ctl("stay quiet for a while", 3600) == ("pause", 3600.0))
+    check("a bare be quiet uses the default",
+          ctl("be quiet", 3600) == ("pause", 3600.0))
+    check("let me work uses the default",
+          ctl("let me work for a bit", 3600) == ("pause", 3600.0))
+    check("minutes are read as digits",
+          ctl("stay quiet for 20 minutes", 3600) == ("pause", 1200.0))
+    check("hours are read as digits",
+          ctl("quiet for 2 hours", 3600) == ("pause", 7200.0))
+    check("minutes are read as words",
+          ctl("quiet for twenty minutes", 3600) == ("pause", 1200.0))
+    check("an hour maps to 3600",
+          ctl("quiet for an hour", 3600) == ("pause", 3600.0))
+    check("half an hour maps to 1800",
+          ctl("quiet for half an hour", 3600) == ("pause", 1800.0))
+    check("seconds are read too",
+          ctl("quiet for 30 seconds", 3600) == ("pause", 30.0))
+    check("an unreadable number falls back to the default",
+          ctl("quiet for umpteen minutes", 900) == ("pause", 900.0))
+    check("resume phrases bring it back",
+          ctl("you can check in again", 3600) == ("resume", 0))
+    check("check in again brings it back",
+          ctl("check on me again please", 3600) == ("resume", 0))
+    check("anything else is not a command",
+          ctl("what is the weather", 3600) is None)
+
+
+def checkin_quiet_helpers():
+    print("\n--- quiet-hours, held apps, and the spoken pause text ---")
+    q = btmain.in_quiet_hours
+    check("a daytime hour is not quiet", q(12, 23, 7) is False)
+    check("late night is quiet", q(23, 23, 7) is True)
+    check("early morning is quiet", q(3, 23, 7) is True)
+    check("the end hour is not quiet", q(7, 23, 7) is False)
+    check("an empty window is never quiet", q(12, 5, 5) is False)
+    check("a same-day window works", q(12, 9, 17) is True)
+    check("outside a same-day window is not quiet", q(20, 9, 17) is False)
+    h = btmain.held_by_app
+    check("a matching hold holds", h("zoom.exe Weekly sync", ["zoom"]) is True)
+    check("no hold terms means never held",
+          btmain.held_by_app("zoom.exe Meeting", []) is False)
+    check("a non-matching window is not held",
+          btmain.held_by_app("code.exe", ["zoom"]) is False)
+    check("an empty label is not held",
+          btmain.held_by_app("", ["zoom"]) is False)
+    s = btmain._spoken_quiet
+    check("hours are spoken in hours", "1 hour" in s(3600), s(3600))
+    check("many hours are plural", "2 hours" in s(7200), s(7200))
+    check("minutes are spoken as minutes",
+          "30 minutes" in s(1800), s(1800))
+    check("a single minute is singular", "1 minute" in s(60), s(60))
+    check("seconds speak as seconds", "30 seconds" in s(30), s(30))
+    check("nothing reads as no check-ins", s(0) == "Okay, no check-ins for now.")
+
+
+def check_in_quiet_and_pause():
+    print("\n--- amain: quiet hours and a spoken pause hold check-ins ---")
+    # A spoken "stay quiet" must stop a check-in that would otherwise fire.
+    mouth, _, res = _run_amain(
+        ["stay quiet for a while", "goodbye seyon"],
+        cfg_extra={"check_in_enabled": True, "check_in_interval": 0.02},
+        ears=_QuietEars(), feed_delay=0.05)
+    check("the paused run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("a spoken pause holds the check-in back",
+          btmain.CHECK_IN_PROMPT not in brain.got, brain.got)
+    check("and it says it will be quiet",
+          any("Quiet for" in s for s in mouth.said), mouth.said)
+
+    # Resume brings them back, and the control is not sent to the brain.
+    mouth2, _, res2 = _run_amain(
+        ["you can check in again", "goodbye seyon"],
+        cfg_extra={"check_in_enabled": True, "check_in_interval": 0.02},
+        ears=_QuietEars(), feed_delay=0.05)
+    check("the resumed run hangs up cleanly",
+          res2["exit"] is None and not res2["timeout"], res2)
+    check("resume is acknowledged",
+          any("back on" in s for s in mouth2.said), mouth2.said)
+
+
+def check_in_quiet_hours():
+    print("\n--- amain: quiet hours hold check-ins by the clock ---")
+    hour = types.SimpleNamespace(tm_hour=23)
+    with mock.patch.object(btmain.time, "localtime", lambda *a: hour):
+        _, _, res = _run_amain(
+            ["goodbye seyon"],
+            cfg_extra={"check_in_enabled": True, "check_in_interval": 0.02,
+                       "check_in_quiet_hours": [23, 7]},
+            ears=_QuietEars(), feed_delay=0.35)
+    check("the quiet-hours run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("an overnight hour holds the check-in back",
+          btmain.CHECK_IN_PROMPT not in brain.got, brain.got)
+
+
+def check_in_held_app():
+    print("\n--- amain: a focused meeting/game holds check-ins ---")
+    screen = _FakeScreen(window=("zoom.exe", "Weekly sync - Zoom"))
+    _, _, res = _run_amain(
+        ["goodbye seyon"],
+        cfg_extra={"check_in_enabled": True, "check_in_interval": 0.02,
+                   "check_in_hold_apps": ["zoom"]},
+        ears=_QuietEars(), screen=screen, feed_delay=0.35)
+    check("the held-app run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("a held app keeps the line quiet",
+          btmain.CHECK_IN_PROMPT not in brain.got, brain.got)
+    check("the focused window was actually read",
+          screen.window_reads > 0, screen.window_reads)
+
+
+def check_in_followup():
+    print("\n--- amain: the follow-up window answers without the wake word ---")
+    mouth, _, res = _run_amain(
+        ["hello"],
+        cfg_extra={"mic_mode": "open", "wake_word": True,
+                   "wake_word_phrases": ["vijay seyon"],
+                   "followup_window": 3.0},
+        ears=_FollowEars(text="goodbye seyon"), feed_delay=0.02)
+    check("the follow-up run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    check("the reply was spoken",
+          any("Answer one." in c for c in mouth.chunks), mouth.chunks)
 
 
 def check_in():
@@ -1447,6 +1616,22 @@ def check_in():
           btmain.CHECK_IN_PROMPT in brain.got, brain.got)
     check("the check-in reply was spoken",
           any("Answer one." in c for c in mouth.chunks), mouth.chunks)
+
+
+def check_in_prompt_activity():
+    print("\n--- amain: a check-in folds in what they were doing ---")
+    screen = _FakeScreen(changes=("code.exe \u2014 main.py",))
+    _, _, res = _run_amain(
+        ["goodbye seyon"],
+        cfg_extra={"check_in_enabled": True, "check_in_interval": 0.02,
+                   "screen_enabled": True, "screen_track_interval": 0.02},
+        ears=_QuietEars(), screen=screen, feed_delay=0.35)
+    check("the specific check-in run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("the check-in named the last activity",
+          any("code.exe \u2014 main.py" in got for got in brain.got),
+          brain.got)
 
 
 def check_in_defer():
@@ -1674,8 +1859,15 @@ amain_loop()
 screen_look()
 activity_tracker()
 check_in_decision()
+checkin_control_text()
+checkin_quiet_helpers()
 check_in()
+check_in_prompt_activity()
 check_in_defer()
+check_in_quiet_and_pause()
+check_in_quiet_hours()
+check_in_held_app()
+check_in_followup()
 tty_reader()
 tty_reader_branches()
 main_entry()

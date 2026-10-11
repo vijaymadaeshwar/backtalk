@@ -120,6 +120,29 @@ DEFAULTS = {
     # companion's "still here?" between silences, not a timer that interrupts.
     "check_in_enabled": False,
     "check_in_interval": 900.0,
+    # A little randomness on the cadence, as a FRACTION of the interval
+    # (0.15 = up to 15% longer). A metronome check-in feels like a machine;
+    # a human looks up at slightly different gaps. 0 disables the jitter.
+    "check_in_jitter": 0.15,
+    # Local hours when the line stays quiet no matter what: [start, end],
+    # 24-hour, wrapping past midnight. The default is overnight (23:00
+    # until 07:00) so a late night does not get a cheery "still there?".
+    # An empty list, or start == end, means no quiet hours at all.
+    "check_in_quiet_hours": [23, 7],
+    # Focused apps that HOLD check-ins: if the active window's app or title
+    # contains any of these (case-insensitive), it stays quiet -- for a
+    # meeting, a game, a full-screen video. Empty means never hold. Only
+    # consulted when the screen module can read the focused window.
+    "check_in_hold_apps": [],
+    # How long "stay quiet for a while" (with no time named) silences
+    # check-ins, in seconds. You can always name a time ("quiet for twenty
+    # minutes") or say "you can check in again" to end it early.
+    "check_in_default_quiet": 3600.0,
+    # After the line finishes speaking, keep listening without the wake word
+    # for this many seconds, so answering a check-in (or any reply) is a
+    # normal back-and-forth instead of "Hey Seyon ..." every time. 0 turns
+    # it off and the wake word is required for every utterance, as before.
+    "followup_window": 0.0,
     # The opencode HTTP server backtalk talks to. It starts its own on
     # this port if nothing is listening, and REUSES a running server if
     # something already is — so starting opencode yourself first is fine
