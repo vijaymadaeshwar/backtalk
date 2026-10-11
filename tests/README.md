@@ -26,7 +26,7 @@ stack running (brain on 4599, face on 8790).
 | `test_endpointing.py` | The open-mic endpointer opens and closes on schedule, and the hands-free gates (loudness floor, minimum phrase length, and the model's own no-speech score) drop noise before whisper sees it. |
 | `test_ptt.py` | Hold-to-talk timing: the release callback fires before transcription, taps are ignored, the time cap still proceeds. |
 | `test_ptt_headless.py` | A machine with no keyboard backend (CI) still imports `backtalk.main`, and asking for a key listener fails cleanly instead of taking the line down. |
-| `test_ptt_units.py` | ptt.py fully offline with a fake keyboard: key-name resolution (letters, friendly names, options), press/release/repeat, the settle grace window, `wait_press`/`is_held`, and the missing-backend import path. |
+| `test_ptt_units.py` | ptt.py fully offline with a fake keyboard: key-name resolution (letters, friendly names, options), press/release/repeat, the settle grace window, `wait_press`/`is_held`, and the import path both with a working backend and with none. |
 | `test_encoding.py` | Every text file is clean UTF-8: no BOM, no double-encoding. |
 | `test_journal.py` | What the session journal writes, what it refuses to write, and what it does when the brain is slow or broken. |
 | `test_vlog.py` | The session log: the terminal line, the timestamped append, the ascii fallback when the console refuses utf-8, the swallowed unwritable log file, and `_init_console`'s Windows and non-Windows paths. |
