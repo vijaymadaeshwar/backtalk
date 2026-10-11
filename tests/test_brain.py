@@ -492,14 +492,14 @@ async def scenario_spawn_cmdline():
                 started["env"] = kw.get("env")
                 self.pid = 7
 
-        with mock.patch.object(brain.shutil, "which",
+        with mock.patch.object(brain.sys, "platform", "win32"), \
+             mock.patch.object(brain.shutil, "which",
                                lambda name: r"C:\tools\opencode.cmd"), \
              mock.patch.object(brain.subprocess, "Popen", _Popen):
             await srv._spawn()
         check("a server is spawned", srv.proc is not None)
-        if sys.platform == "win32":
-            check("a .cmd launcher is wrapped in cmd /c",
-                  started["cmd"][:2] == ["cmd", "/c"], started["cmd"])
+        check("a .cmd launcher is wrapped in cmd /c",
+              started["cmd"][:2] == ["cmd", "/c"], started["cmd"])
         check("the server password is cleared from the child env",
               "OPENCODE_SERVER_PASSWORD" not in started["env"]
               and started["env"].get("OPENCODE_CLIENT") == "backtalk",
