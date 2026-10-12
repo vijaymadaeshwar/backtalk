@@ -79,14 +79,17 @@ class Ducker:
                 self._timer = None
             if self._original is not None:
                 return  # already ducked
-            current = _spotify_volume()
-            if current is None or current <= THRESHOLD:
-                return
-            target = max(THRESHOLD, int(current * PCT))
-            if target >= current:  # pragma: no cover -- PCT < 1, so target < current
-                return
+        # Probe and duck OUTSIDE the lock. _spotify_volume and _set_volume
+        # each spawn osascript (up to a 2s timeout), and holding the lock
+        # across them would stall a shutdown's restore_now -- the one call
+        # that must never wait on the audio bridge.
+        current = _spotify_volume()
+        if current is None or current <= THRESHOLD:
+            return
+        target = max(THRESHOLD, int(current * PCT))
+        with self._lock:
             self._original = current
-            _set_volume(target)
+        _set_volume(target)
 
     def speech_end(self, debounce: float = RESTORE_DEBOUNCE_S):
         """Schedule a debounced restore; resumed speech cancels it."""

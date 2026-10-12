@@ -107,6 +107,10 @@ class PTTListener:
         self._held = False
         self._release_t = None          # a release awaiting confirmation
         self._press_evt = threading.Event()
+        # Guarded so the listener thread (_on_press/_on_release) and the
+        # turn loop (_settle via is_held/wait_press) never read half-updated
+        # state or miss each other's writes.
+        self._lock = threading.Lock()
         self._listener = keyboard.Listener(on_press=self._on_press,
                                            on_release=self._on_release)
         self._listener.daemon = True
@@ -115,25 +119,28 @@ class PTTListener:
     def _on_press(self, k):
         if k != self._key:
             return
-        # A press cancels any pending release: that release was auto-repeat,
-        # not a human letting go.
-        self._release_t = None
-        if not self._held:                      # filter key-repeat
-            self._held = True
-            self._press_evt.set()
+        with self._lock:
+            # A press cancels any pending release: that release was
+            # auto-repeat, not a human letting go.
+            self._release_t = None
+            if not self._held:                      # filter key-repeat
+                self._held = True
+                self._press_evt.set()
 
     def _on_release(self, k):
         if k == self._key:
-            # PROVISIONAL. Believed only if no press follows; see _settle().
-            self._release_t = time.monotonic()
+            with self._lock:
+                # PROVISIONAL. Believed only if no press follows; see _settle().
+                self._release_t = time.monotonic()
 
     def _settle(self):
         """Commit a release that has stood unchallenged for the grace window."""
-        r = self._release_t
-        if self._held and r is not None and \
-                time.monotonic() - r >= self.RELEASE_GRACE:
-            self._held = False
-            self._release_t = None
+        with self._lock:
+            r = self._release_t
+            if self._held and r is not None and \
+                    time.monotonic() - r >= self.RELEASE_GRACE:
+                self._held = False
+                self._release_t = None
 
     def wait_press(self):
         """Block until the key goes DOWN (one event per physical press)."""

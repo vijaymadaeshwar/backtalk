@@ -155,6 +155,15 @@ def synth_chain():
 
         with mock.patch.object(mouth, "_elevenlabs_ready", return_value=True), \
              mock.patch.object(mouth, "_stream_elevenlabs",
+                               side_effect=lambda *a, **k: iter([])), \
+             mock.patch.object(mouth, "_stream_kokoro",
+                               side_effect=lambda t: iter([pcm])):
+            out = list(mouth.synth_stream("hi"))
+        check("empty elevenlabs output falls through to kokoro",
+              bool(out) and out[0][0] == mouth.KOKORO_RATE, out)
+
+        with mock.patch.object(mouth, "_elevenlabs_ready", return_value=True), \
+             mock.patch.object(mouth, "_stream_elevenlabs",
                                side_effect=RuntimeError("cloud down")), \
              mock.patch.object(mouth, "_stream_kokoro",
                                side_effect=lambda t: iter([pcm])):
@@ -905,12 +914,19 @@ def elevenlabs_stream():
             return chunk
 
     class FakeProc:
-        def __init__(self, data, stdin=True, close_boom=False):
+        def __init__(self, data, stdin=True, close_boom=False, kill_boom=False):
             self.stdin = FakeStdin(close_boom) if stdin else None
             self.stdout = FakeStdout(data, self.stdin) if stdin else None
+            self.killed = False
+            self._kill_boom = kill_boom
 
         def wait(self, timeout=None):
             return 0
+
+        def kill(self):
+            self.killed = True
+            if self._kill_boom:
+                raise OSError("no such process")
 
     class FakeStream:
         def __init__(self, chunks, fail=False):
@@ -988,6 +1004,27 @@ def elevenlabs_stream():
                            return_value=FakeProc(pcm_bytes, close_boom=True)):
         out = list(mouth._stream_elevenlabs("hello", 5.0))
     check("a failing stdin.close is swallowed",
+          out and out[0].tolist() == [5, -5, 10], out)
+
+    holder["stream"] = FakeStream([pcm_bytes])
+    proc = FakeProc(pcm_bytes)
+    with mock.patch.dict(sys.modules, {"httpx": fake_httpx}), \
+         mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth, "_get_elevenlabs_key", return_value="k"), \
+         mock.patch.object(mouth.subprocess, "Popen", return_value=proc):
+        gen = mouth._stream_elevenlabs("hello", 5.0)
+        next(gen)
+        gen.close()
+    check("abandoning the stream mid-way kills ffmpeg", proc.killed)
+
+    holder["stream"] = FakeStream([pcm_bytes])
+    with mock.patch.dict(sys.modules, {"httpx": fake_httpx}), \
+         mock.patch.object(mouth, "CFG", cfg), \
+         mock.patch.object(mouth, "_get_elevenlabs_key", return_value="k"), \
+         mock.patch.object(mouth.subprocess, "Popen",
+                           return_value=FakeProc(pcm_bytes, kill_boom=True)):
+        out = list(mouth._stream_elevenlabs("hello", 5.0))
+    check("a kill that fails is swallowed",
           out and out[0].tolist() == [5, -5, 10], out)
 
 

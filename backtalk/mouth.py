@@ -360,6 +360,7 @@ def _stream_elevenlabs(text: str, timeout: float):
     stdin = proc.stdin
     stdout = proc.stdout
     if stdin is None or stdout is None:   # impossible with PIPE; narrows
+        _end_ffmpeg(proc, stdin)
         return
 
     feed_error: list = []
@@ -387,19 +388,37 @@ def _stream_elevenlabs(text: str, timeout: float):
     t.start()
     carry = b""
     got_audio = False
-    while True:
-        data = stdout.read(8820)
-        if not data:
-            break
-        data = carry + data
-        usable = len(data) - (len(data) % 2)
-        carry = data[usable:]
-        if usable:
-            got_audio = True
-            yield np.frombuffer(data[:usable], dtype=np.int16)
-    proc.wait(timeout=10)
+    try:
+        while True:
+            data = stdout.read(8820)
+            if not data:
+                break
+            data = carry + data
+            usable = len(data) - (len(data) % 2)
+            carry = data[usable:]
+            if usable:
+                got_audio = True
+                yield np.frombuffer(data[:usable], dtype=np.int16)
+        proc.wait(timeout=10)
+    finally:
+        _end_ffmpeg(proc, stdin)
     if feed_error and not got_audio:
         raise feed_error[0]
+
+
+def _end_ffmpeg(proc, stdin) -> None:
+    """Reclaim a half-finished synth. A barge-in abandons this generator
+    mid-stream (GeneratorExit at the yield); without this, ffmpeg and the
+    thread feeding it outlive the sentence. Killing ffmpeg also closes the
+    pipe the feeder is blocked on, so that daemon thread ends too."""
+    try:
+        stdin.close()
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 _el_key_cache: str | None = None
@@ -468,13 +487,18 @@ def synth_stream(text: str, timeout: float = 30.0):
     silence, stays covered by the espeak-ng fallback at the bottom.
     """
     if _elevenlabs_ready():
+        spoke = False
         try:
             for pcm in _stream_elevenlabs(text, timeout):
+                spoke = True
                 yield EL_RATE, pcm
-            return
         except Exception as e:
             log(f"[mouth] elevenlabs failed ({str(e)[:60]}) - "
                 f"falling back to {CFG['voice']}")
+        if spoke:
+            return
+        # Empty output with no error is still silence; fall through to Kokoro
+        # rather than leave the sentence unsaid.
 
     got = False
     try:

@@ -225,6 +225,19 @@ def fetch_cache():
         check("stale entry refetched", "NEW" in out and w.called, out[:60])
 
 
+def fetch_cache_bound():
+    print("\n--- the cache is bounded ---")
+    live._cache.clear()
+    live._remember("keep", "value")
+    check("a new key is stored", live._cache["keep"][1] == "value")
+    for i in range(live.CACHE_MAX):
+        live._remember("k%d" % i, "x")
+    check("the cache never exceeds its cap",
+          len(live._cache) == live.CACHE_MAX, len(live._cache))
+    check("the oldest entry was evicted", "keep" not in live._cache)
+    live._cache.clear()
+
+
 def fetch_truncation():
     print("\n--- fetch: the briefing is bounded ---")
     live._cache.clear()
@@ -245,6 +258,7 @@ wikipedia()
 network()
 fetch_branches()
 fetch_cache()
+fetch_cache_bound()
 fetch_truncation()
 
 print("\n" + "=" * 66)

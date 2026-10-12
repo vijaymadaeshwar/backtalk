@@ -1592,7 +1592,7 @@ async def amain():
         # so a box with no board treats these as ordinary talk.
         bc = board_command(text) if board.enabled() else None
         if bc is not None:
-            ok = board.send(bc)
+            ok = await loop.run_in_executor(_BLOCKERS, board.send, bc)
             log(f"[board] {bc.get('a')} -> "
                 f"{'ok' if ok else 'unreachable'}")
             mouth.say(_board_ack(bc, ok))
@@ -1603,7 +1603,8 @@ async def amain():
         # journal is configured; with none, it is an ordinary question.
         rq = recall_request(text) if CFG["journal_dir"] else None
         if rq:
-            line = recall.spoken(rq, CFG["journal_dir"])
+            line = await loop.run_in_executor(
+                _BLOCKERS, recall.spoken, rq, CFG["journal_dir"])
             log("[recall] answered from the journal")
             mouth.say(line)
             signals.set_state("idle")
@@ -1712,11 +1713,14 @@ async def amain():
             if _MIC["gen"] != mic_gen_seen:
                 mic_gen_seen = _MIC["gen"]
                 # consume futures that completed under the old mode so
-                # a stale press or capture can't fire after a switch
+                # a stale press or capture can't fire after a switch.
+                # .exception() observes a failed capture without raising:
+                # a mic that errored as its mode was pulled out from under
+                # it is expected, not a reason to crash the turn loop.
                 if press_fut is not None and press_fut.done():
-                    press_fut.result(); press_fut = None
+                    press_fut.exception(); press_fut = None
                 if mic_fut is not None and mic_fut.done():
-                    mic_fut.result(); mic_fut = None
+                    mic_fut.exception(); mic_fut = None
             if typed_fut is None:
                 typed_fut = loop.run_in_executor(_BLOCKERS, typed_q.get)
             if press_fut is None and ptt is not None:

@@ -50,8 +50,18 @@ NEWSY = re.compile(
 
 MAX_CHARS = 2200
 CACHE_TTL = 300.0
+CACHE_MAX = 512
 TIMEOUT = 6.0
 _cache: dict[str, tuple[float, str]] = {}
+
+
+def _remember(key: str, value: str) -> None:
+    """Store a briefing. Keys are whole utterances, so a long-running line
+    would otherwise grow the cache without bound; once full, the oldest
+    entry goes (dicts keep insertion order, so the first key is oldest)."""
+    if len(_cache) >= CACHE_MAX:
+        _cache.pop(next(iter(_cache)), None)
+    _cache[key] = (time.time(), value)
 
 
 def wants_live(utterance: str) -> bool:
@@ -151,7 +161,7 @@ def fetch(utterance: str) -> str:
             briefing = ""
 
     if not briefing:
-        _cache[key] = (time.time(), "")
+        _remember(key, "")
         return ""
 
     stamp = time.strftime("%A, %d %B %Y at %H:%M")
@@ -166,5 +176,5 @@ def fetch(utterance: str) -> str:
            f"them unless he asks for more, and never read the whole list.\n"
            f"{briefing}")
     out = out[:MAX_CHARS]
-    _cache[key] = (time.time(), out)
+    _remember(key, out)
     return out

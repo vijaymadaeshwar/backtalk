@@ -202,6 +202,15 @@ class _Server:
             raise
         except Exception as e:
             log(f"[brain] event stream ended: {e!r}")
+        finally:
+            # Close the connection on every exit, cancel included: without
+            # this a stop/clear leaks a socket that holds an _IO worker for
+            # the life of its 600s read timeout, and enough of those starve
+            # the pool the readers share.
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     async def next_event(self, timeout: float | None = None) -> dict | None:
         # A dropped connection is silent: the reader task ends and the queue

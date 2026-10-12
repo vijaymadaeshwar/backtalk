@@ -572,9 +572,13 @@ async def scenario_read_events():
     class _Stream:
         def __init__(self, lines):
             self._lines = list(lines)
+            self.closed = False
 
         def readline(self):
             return self._lines.pop(0) if self._lines else b""
+
+        def close(self):
+            self.closed = True
 
     srv2 = brain._Server()
     stream = _Stream([b"\n", b"not an event\n",
@@ -586,6 +590,19 @@ async def scenario_read_events():
     ev = srv2._events.get_nowait()
     check("the reader forwards events and skips junk",
           ev.get("type") == "hello", ev)
+    check("the stream is closed when the reader ends", stream.closed)
+
+    srv3 = brain._Server()
+    closed_boom = _Stream([b""])
+
+    def _boom():
+        raise OSError("already closed")
+
+    closed_boom.close = _boom
+    with mock.patch.object(brain.urllib.request, "urlopen",
+                           lambda *a, **k: closed_boom):
+        await srv3._read_events()
+    check("a stream whose close fails is still handled", True)
 
     class _BadStream:
         def readline(self):
