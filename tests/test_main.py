@@ -809,6 +809,17 @@ class _SlowBrain(_LoopBrain):
         yield "Slow answer."
 
 
+class _SlowRecordBrain(_LoopBrain):
+    """Records the turn, then dawdles, so an interrupt catches it mid-reply."""
+
+    async def ask_stream(self, text):
+        if text.startswith("Warmup ping"):
+            return
+        self.got.append(text)
+        await asyncio.sleep(0.4)
+        yield "Slow answer."
+
+
 class _PermBrain(_LoopBrain):
     """Mimics the SDK: a turn poses a spoken ask and resumes when the
     NEXT utterance resolves it."""
@@ -1057,6 +1068,9 @@ def _run_amain(feed, cfg_extra=None, argv=(), brain_cls=_LoopBrain,
         if feed_delay:
             time.sleep(feed_delay)
         for line in feed:
+            if isinstance(line, tuple):
+                time.sleep(line[0])
+                line = line[1]
             q.put(line)
         # The loop often returns while its last `typed_q.get` is still
         # parked in a pool thread. That thread is non-daemon, so leaving
@@ -1530,6 +1544,96 @@ def checkin_quiet_helpers():
     check("nothing reads as no check-ins", s(0) == "Okay, no check-ins for now.")
 
 
+def reminder_and_stop_helpers():
+    print("\n--- reminders and stop words: the pure wording ---")
+    r = btmain.reminder_request
+    check("a plain remind-me with minutes is read",
+          r("remind me in 20 minutes to stretch") == (1200.0, "stretch"))
+    check("a timer with no label is read",
+          r("set a timer for 5 minutes") == (300.0, ""))
+    check("an hour looks past the hour word",
+          r("remind me in an hour to call mom") == (3600.0, "call mom"))
+    check("half an hour is understood",
+          r("remind me in half an hour to rest") == (1800.0, "rest"))
+    check("no length named reads as zero seconds",
+          r("remind me to water the plants") == (0, "water the plants"))
+    check("a non-reminder is not a reminder",
+          r("what is the weather") is None)
+    check("hours are spoken as hours",
+          btmain._human_span(3600) == "1 hour")
+    check("minutes are spoken as minutes",
+          btmain._human_span(1800) == "30 minutes")
+    check("seconds are spoken as seconds",
+          btmain._human_span(30) == "30 seconds")
+    check("a single second stays singular",
+          btmain._human_span(1) == "1 second")
+    check("the reminder acknowledgement names the span",
+          btmain._spoken_reminder(1200, "stretch")
+          == "Okay, I'll remind you in 20 minutes to stretch.")
+    check("the acknowledgement drops an empty label",
+          btmain._spoken_reminder(300, "")
+          == "Okay, I'll remind you in 5 minutes.")
+    check("a reminder with a label is spoken",
+          btmain._reminder_line("stretch") == "Reminder: stretch.")
+    check("a label-less reminder is a timer",
+          btmain._reminder_line("") == "Your timer is up.")
+    s = btmain.stop_command
+    check("a bare stop is a stop", s("stop") is True)
+    check("stop it is a stop", s("stop it") is True)
+    check("cancel is a stop", s("cancel") is True)
+    check("never mind is a stop", s("never mind") is True)
+    check("a sentence with stop is not a stop",
+          s("stop the docker container") is False)
+    check("an unrelated phrase is not a stop", s("what time is it") is False)
+
+
+def reminders():
+    print("\n--- amain: a spoken reminder fires on time ---")
+    mouth, _, res = _run_amain(
+        ["remind me in 1 second to stretch", (1.4, "goodbye seyon")])
+    check("the reminder run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    check("the reminder was acknowledged",
+          any("I'll remind you in 1 second to stretch" in s
+              for s in mouth.said), mouth.said)
+    check("the reminder fired when its moment came",
+          "Reminder: stretch." in mouth.said, mouth.said)
+
+    mouth2, _, res2 = _run_amain(
+        ["set a timer for 1 second", (1.4, "goodbye seyon")])
+    check("a label-less timer hangs up cleanly",
+          res2["exit"] is None and not res2["timeout"], res2)
+    check("a label-less timer says time is up",
+          "Your timer is up." in mouth2.said, mouth2.said)
+
+    mouth3, _, res3 = _run_amain(
+        ["remind me to water the plants", "goodbye seyon"])
+    check("a timeless reminder asks for a time",
+          any("How long from now" in s for s in mouth3.said), mouth3.said)
+
+
+def stop_words():
+    print("\n--- amain: a spoken stop cuts the reply ---")
+    mouth, _, res = _run_amain(
+        ["ask one", "stop", "goodbye seyon"], brain_cls=_SlowRecordBrain)
+    check("the stop run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("the stop word never reached the brain",
+          brain.got == ["ask one"], brain.got)
+    check("the stop is acknowledged mid-reply",
+          "Okay." in mouth.said, mouth.said)
+
+    mouth2, _, res2 = _run_amain(["stop", "goodbye seyon"])
+    check("a stop with nothing playing still hangs up",
+          res2["exit"] is None and not res2["timeout"], res2)
+    brain2 = _LoopBrain.instances[-1]
+    check("a silent stop is not sent to the brain",
+          "stop" not in brain2.got, brain2.got)
+    check("a silent stop is not acknowledged",
+          "Okay." not in mouth2.said, mouth2.said)
+
+
 def check_in_quiet_and_pause():
     print("\n--- amain: quiet hours and a spoken pause hold check-ins ---")
     # A spoken "stay quiet" must stop a check-in that would otherwise fire.
@@ -1861,6 +1965,9 @@ activity_tracker()
 check_in_decision()
 checkin_control_text()
 checkin_quiet_helpers()
+reminder_and_stop_helpers()
+reminders()
+stop_words()
 check_in()
 check_in_prompt_activity()
 check_in_defer()

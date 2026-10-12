@@ -840,10 +840,12 @@ def _quiet_seconds(norm, default):
     falls back to the default, so "stay quiet" is always safe to say."""
     if "half an hour" in norm or "half hour" in norm:
         return 1800.0
-    m = re.search(r"(?:for\s+)?(\d+)\s*(second|minute|min|hour|hr)", norm)
+    m = re.search(r"(?:for\s+)?(\d+)\s*(second|minute|min|hour|hr)s?\b", norm)
     if not m:
+        # A whole word before the unit, so "remind me in an hour" matches
+        # "an hour" and not the "min" hiding inside "remind".
         m = re.search(
-            r"(?:for\s+)?([a-z]+)\s*(second|minute|min|hour|hr)", norm)
+            r"(?:for\s+)?([a-z]+)\s+(second|minute|min|hour|hr)s?\b", norm)
     if not m:
         return float(default)
     raw, unit = m.group(1), m.group(2)
@@ -868,21 +870,80 @@ def checkin_control(text, default_quiet):
     return None
 
 
-def _spoken_quiet(secs):
-    """Ten seconds becomes "ten seconds", ninety minutes becomes "ninety
+def _human_span(secs):
+    """Ten seconds becomes "10 seconds", ninety minutes becomes "90
     minutes", not "1.5 hours" -- the unit a person would actually say."""
     secs = int(secs)
     if secs >= 3600 and secs % 3600 == 0:
         n, unit = secs // 3600, "hour"
     elif secs >= 60:
         n, unit = round(secs / 60), "minute"
-    elif secs > 0:
-        n, unit = secs, "second"
     else:
+        n, unit = max(1, secs), "second"
+    return f"{n} {unit}" + ("" if n == 1 else "s")
+
+
+def _spoken_quiet(secs):
+    """The spoken acknowledgement of a spoken pause. A non-positive span
+    reads as "no check-ins" -- the phrase was heard, the length was not."""
+    if int(secs) <= 0:
         return "Okay, no check-ins for now."
-    plural = "" if n == 1 else "s"
-    return (f"Quiet for {n} {unit}{plural}. I'll leave you be until then. "
+    return (f"Quiet for {_human_span(secs)}. I'll leave you be until then. "
             "Say you can check in again to bring me back sooner.")
+
+
+# The bare words that mean "stop talking to me right now". Kept to exact
+# whole-utterance matches so a sentence containing "stop" still reaches the
+# brain; only a lone "stop" (or "cancel", "never mind") cuts the line.
+_STOP_WORDS = (
+    "stop", "stop it", "stop please", "please stop", "cancel",
+    "cancel that", "never mind", "nevermind", "forget it", "shut up",
+    "hush", "enough", "that's enough", "thats enough",
+)
+
+
+def stop_command(text):
+    """True when the whole utterance is a "stop talking" word. Pure, so the
+    phrasing is easy to test and to extend."""
+    return _norm_speech(text) in {_norm_speech(w) for w in _STOP_WORDS}
+
+
+# The spoken openings that ask for a reminder or a timer. Matched as
+# starts-with after normalization, so "remind me to call mom in an hour"
+# and "set a timer for 5 minutes" both land.
+_REMIND_ON = (
+    "remind me", "set a reminder", "set reminder", "make a reminder",
+    "set a timer", "set timer", "start a timer", "start timer",
+    "timer for", "wake me",
+)
+
+
+def reminder_request(text):
+    """Read a spoken reminder. Returns (seconds, label), with seconds 0
+    when no length was named, or None when this is not a reminder at all.
+    Kept pure: the length reuses _quiet_seconds, so "in 20 minutes", "an
+    hour", and "half an hour" all work for free."""
+    norm = _norm_speech(text)
+    if not any(norm.startswith(p) for p in _REMIND_ON):
+        return None
+    secs = _quiet_seconds(norm, 0)
+    label = ""
+    low = text.lower()
+    i = low.rfind(" to ")
+    if i != -1:
+        label = text[i + 4:].strip(" .!?,")
+    return (secs, label)
+
+
+def _spoken_reminder(secs, label):
+    """The spoken acknowledgement of a set reminder."""
+    tail = f" to {label}" if label else ""
+    return f"Okay, I'll remind you in {_human_span(secs)}{tail}."
+
+
+def _reminder_line(label):
+    """The spoken reminder itself, when its moment arrives."""
+    return f"Reminder: {label}." if label else "Your timer is up."
 
 
 async def journal_flush(journal: Journal, brain: WarmBrain):
@@ -1064,6 +1125,10 @@ async def amain():
     _ACTIVITY = {"at": time.monotonic()}
     _CHECKIN = {"paused_until": 0.0}
     _FOLLOWUP = {"until": 0.0}
+    # Pending spoken reminders, each {"at": monotonic-deadline, "label": str}.
+    # The main wait caps itself at the nearest one so the loop wakes to
+    # speak it; nothing else has to poll.
+    _REMINDERS: list[dict[str, Any]] = []
 
     def _check_in_prompt():
         """The check-in prompt, with the last thing they were doing folded
@@ -1294,6 +1359,13 @@ async def amain():
             mouth.say(CFG["signoff"])
             mouth.wait_done(timeout=15)
             return False
+        # A bare "stop" / "cancel" / "never mind" cuts any reply and goes
+        # no further -- it is an instruction to the LINE, not a question
+        # for the brain. Only a lone stop word matches; a sentence that
+        # happens to contain one still reaches the model.
+        stopping = stop_command(text)
+        was_speaking = bool(speak_task and not speak_task.done()) \
+            or mouth.speaking
         if speak_task and not speak_task.done():
             log("[turn] interrupted mid-reply by new input")
             _deny_pending()          # an ask never outlives its turn
@@ -1312,6 +1384,24 @@ async def amain():
             except Exception:  # pragma: no cover -- speak_reply swallows its own
                 pass
             speak_task = None
+        if stopping:
+            if was_speaking:
+                mouth.say("Okay.")
+            signals.set_state("idle")
+            return True
+        # A spoken reminder / timer is scheduled here, off the conversation.
+        rem = reminder_request(text)
+        if rem is not None:
+            secs, label = rem
+            if secs <= 0:
+                mouth.say("Sure. How long from now should I remind you?")
+            else:
+                _REMINDERS.append({"at": time.monotonic() + secs,
+                                   "label": label})
+                mouth.say(_spoken_reminder(secs, label))
+            log("[reminder] set")
+            signals.set_state("idle")
+            return True
         # A spoken "stay quiet" / "you can check in again" is handled here,
         # not by the brain: it is a setting for the voice LINE, and routing
         # it through the model would risk it being "answered" instead of
@@ -1367,6 +1457,15 @@ async def amain():
         _reply_task(
             speak_reply(brain, mouth, _check_in_prompt(),
                         on_reply=journal.say_agent))
+
+    def _do_reminder(due):
+        """Speak any reminders whose moment has passed. A plain spoken line,
+        not a brain turn: a reminder must land instantly and must not depend
+        on the model being reachable."""
+        for r in due:
+            mouth.say(_reminder_line(r["label"]))
+        signals.set_state("idle")
+        log(f"[reminder] spoke {len(due)}")
 
     try:
         # ONE loop, two mic modes, switchable live (_MIC). The talk key
@@ -1440,25 +1539,35 @@ async def amain():
             # Check-ins ride this same wait: when the feature is on, cap
             # the wait at the quiet time remaining so the loop wakes to
             # consider starting a conversation. The floor keeps that
-            # wake-up sane once the window has already elapsed.
+            # wake-up sane once the window has already elapsed. A pending
+            # reminder caps it too, so a spoken timer fires on time.
             timeout = None
             if check_interval:
                 timeout = max(0.1, check_interval
                               - (time.monotonic() - _ACTIVITY["at"])
                               + random.uniform(
                                   0, check_jitter * check_interval))
+            if _REMINDERS:
+                soonest = max(0.0, min(r["at"] for r in _REMINDERS)
+                              - time.monotonic())
+                timeout = soonest if timeout is None else min(timeout, soonest)
             done, _ = await asyncio.wait(
                 waiters, return_when=asyncio.FIRST_COMPLETED,
                 timeout=timeout)
             if not done:
                 # The wait timed out with nothing said. Reset the clock
-                # either way, then speak only if nothing is in flight and
-                # the person has not asked for quiet -- otherwise this was
-                # a busy moment, or a quiet one they chose, and it stays
-                # quiet.
-                idle = time.monotonic() - _ACTIVITY["at"]
-                _ACTIVITY["at"] = time.monotonic()
-                if check_in_due(
+                # either way. A due reminder speaks first and takes the
+                # slot; otherwise, speak a check-in only if nothing is in
+                # flight and the person has not asked for quiet.
+                now = time.monotonic()
+                due = [r for r in _REMINDERS if r["at"] <= now]
+                for r in due:
+                    _REMINDERS.remove(r)
+                idle = now - _ACTIVITY["at"]
+                _ACTIVITY["at"] = now
+                if due:
+                    _do_reminder(due)
+                elif check_in_due(
                         CFG.get("check_in_enabled"), check_interval, idle,
                         mouth.speaking,
                         bool(speak_task and not speak_task.done()),
