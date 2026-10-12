@@ -530,6 +530,15 @@ class Mouth:
         self._out: sd.OutputStream | None = None
         self._out_rate: int | None = None
         self.ducker = Ducker()  # public: PTT ducks for the USER's voice too
+        # Barge-in epoch and the count of queued-but-not-yet-finished
+        # utterances, both guarded by _lock. The epoch is how a sentence the
+        # worker had already pulled -- but not yet started -- learns it was
+        # interrupted; the count is how wait_done tells "between two
+        # sentences of one reply" apart from "the reply is over" without ever
+        # observing the worker's dequeue->playing gap. See _serve/wait_done.
+        self._lock = threading.Lock()
+        self._epoch = 0
+        self._outstanding = 0
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._worker.start()
 
@@ -540,7 +549,7 @@ class Mouth:
     def say(self, text: str):
         """Queue text (split to sentences) for speech."""
         for s in split_sentences(text):
-            self._q.put((s, None))
+            self._put(s, None)
 
     def say_chunk(self, text: str, directions=None):
         """Queue text as ONE TTS request, no sentence splitting — fuller
@@ -552,16 +561,40 @@ class Mouth:
         is why they travel with it instead of firing at parse time."""
         text = text.strip()
         if text:
-            self._q.put((text, directions or None))
+            self._put(text, directions or None)
+
+    def _put(self, sentence: str, directions=None):
+        """Enqueue one utterance, stamped with the current barge-in epoch.
+
+        The count and the epoch are read together under the lock, so a
+        barge-in can never land in the gap between "the worker took this off
+        the queue" and "the worker committed to speaking it": either the
+        stamp is the old epoch (the barge-in wins and the item is dropped),
+        or the epoch was already bumped and this is genuinely new work."""
+        with self._lock:
+            self._outstanding += 1
+            epoch = self._epoch
+        self._q.put((sentence, directions or None, epoch))
 
     def shut_up(self):
-        """Barge-in: stop current playback and flush everything queued."""
-        self._stop.set()
-        try:
-            while True:
+        """Barge-in: stop current playback and flush everything queued.
+
+        Bumping the epoch under the lock is what drops a sentence the worker
+        had already dequeued: it carries the old epoch, so when it reaches
+        the front of _serve it is discarded unspoken instead of talking over
+        the person who interrupted."""
+        with self._lock:
+            self._epoch += 1
+            self._stop.set()
+        drained = 0
+        while True:
+            try:
                 self._q.get_nowait()
-        except queue.Empty:
-            pass
+            except queue.Empty:
+                break
+            drained += 1
+        if drained:
+            self._finish(drained)
 
     def shutdown(self):
         """Exit path: stop playback and restore the music SYNCHRONOUSLY
@@ -570,41 +603,74 @@ class Mouth:
         self.ducker.restore_now()
 
     def wait_done(self, timeout: float | None = None):
-        """Block until the queue is drained and playback finished."""
+        """Block until everything queued has been played or dropped.
+
+        The outstanding count, not the queue, is the thing to watch: it is
+        raised the moment an utterance is queued and lowered only once it
+        has finished, so the instant the worker pulls the last sentence (the
+        queue is empty but playback has not started) is not mistaken for
+        done. The speaking event stays in the test for the uncounted case."""
         import time
         deadline = None if timeout is None else time.time() + timeout
-        while (not self._q.empty()) or self._speaking.is_set():
+        while True:
+            with self._lock:
+                busy = self._outstanding > 0
+            if not busy and self._q.empty() and not self._speaking.is_set():
+                return
             time.sleep(0.05)
             if deadline and time.time() > deadline:
                 return
 
     def _run(self):
-        from backtalk import signals
         while True:
-            item = self._q.get()
-            sentence, directions = item if isinstance(item, tuple) else (item, None)
-            if not sentence:
-                continue
-            self._stop.clear()
-            self._speaking.set()
-            self.ducker.speech_start()
-            signals.static_stop()     # thinking sound dies when speech starts
-            signals.set_state("speaking")
-            try:
-                self._play_stream(sentence, directions)
-            except Exception as e:
-                log(f"[mouth] synth/play error: {e}")
-            finally:
-                if self._q.empty():
-                    self._speaking.clear()
-                    # The reply has genuinely stopped talking, as opposed to
-                    # the gap between two sentences of the same reply.
-                    # The caption goes only here, not when the sentences were
-                    # queued: the queue drains well after the model is done.
-                    signals.caption_clear()
-                    signals.reply_done()
-                    self.ducker.speech_end()
-                    signals.set_state("idle")
+            self._serve()
+
+    def _serve(self):
+        """Pull one utterance and speak it -- unless a barge-in overtook it."""
+        from backtalk import signals
+        sentence, directions, epoch = self._q.get()
+        if not sentence:
+            self._finish(1)
+            return
+        with self._lock:
+            interrupted = epoch < self._epoch
+            if not interrupted:
+                self._stop.clear()
+                self._speaking.set()
+        if interrupted:
+            self._finish(1)
+            return
+        self.ducker.speech_start()
+        signals.static_stop()     # thinking sound dies when speech starts
+        signals.set_state("speaking")
+        try:
+            self._play_stream(sentence, directions)
+        except Exception as e:
+            log(f"[mouth] synth/play error: {e}")
+        finally:
+            self._finish(1)
+
+    def _finish(self, n: int):
+        """Book n utterances as done. Emptying the count means the reply has
+        genuinely stopped talking, as opposed to the gap between two
+        sentences of the same reply -- so that is where "speaking" clears and
+        the idle signals fire. Guarded by was_speaking so a barge-in that
+        drains queued-but-unstarted work never flashes the screen idle."""
+        from backtalk import signals
+        with self._lock:
+            self._outstanding -= n
+            idle = self._outstanding <= 0
+            was_speaking = self._speaking.is_set()
+            if idle:
+                self._speaking.clear()
+        if idle and was_speaking:
+            # The caption goes only here: the queue drains well after the
+            # model is done writing, so clearing it at enqueue time would
+            # blank the words while they are still being spoken.
+            signals.caption_clear()
+            signals.reply_done()
+            self.ducker.speech_end()
+            signals.set_state("idle")
 
     def _get_out(self, rate: int) -> sd.OutputStream:
         """The long-lived stream (audio law #1). Reopened only when the

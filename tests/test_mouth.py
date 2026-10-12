@@ -331,7 +331,7 @@ def queue_behaviour():
     m.say_chunk("  a single chunk  ", ["wave"])
     item = m._q.get_nowait()
     check("say_chunk keeps one request and strips it",
-          item == ("a single chunk", ["wave"]), item)
+          item[:2] == ("a single chunk", ["wave"]), item)
     m.say_chunk("   ")
     check("blank say_chunk queues nothing", m._q.empty())
 
@@ -694,6 +694,53 @@ def key_linux():
               mouth._get_elevenlabs_key() == "envk")
 
 
+def barge_in():
+    print("\n--- a barge-in cannot lose a sentence mid-handoff ---")
+    played = []
+    with mock.patch.object(Mouth, "_play_stream",
+                           new=lambda self, s, d=None: played.append(s)), \
+         mock.patch.object(sig, "static_stop"), \
+         mock.patch.object(sig, "set_state"), \
+         mock.patch.object(sig, "caption"), \
+         mock.patch.object(sig, "caption_clear"), \
+         mock.patch.object(sig, "reply_done") as reply_done, \
+         mock.patch.object(sig, "feed_waveform"), \
+         mock.patch.object(sig, "direction"):
+        # The worker had already pulled this sentence when the barge-in
+        # landed: stamped with the old epoch, it must be dropped unspoken.
+        m = quiet_mouth()
+        m._put("stale.", None)
+        m._epoch = 1                    # shut_up's bump, but it was pulled
+        m._stop.set()
+        m._serve()
+        check("a sentence caught mid-handoff is dropped, not spoken",
+              played == [], played)
+
+        # A fresh, post-barge-in sentence must still play.
+        m._put("fresh.", None)
+        m._serve()
+        check("work queued after the barge-in still plays",
+              played == ["fresh."], played)
+
+        # Barge in on the last outstanding sentence: the drop must still
+        # clear 'speaking' and announce idle, or the mouth hangs "speaking".
+        reply_done.reset_mock()
+        m2 = quiet_mouth()
+        m2._put("said.", None)
+        m2._speaking.set()              # mid-sentence
+        m2._epoch = 1
+        m2._stop.set()
+        m2._serve()
+        check("dropping the last item clears speaking and goes idle",
+              not m2.speaking and reply_done.called)
+
+        # Draining work that never started must NOT flash the screen idle.
+        reply_done.reset_mock()
+        m2._put("unstarted.", None)
+        m2.shut_up()
+        check("draining unstarted work stays silent", not reply_done.called)
+
+
 def wait_done_timeout():
     print("\n--- wait_done gives up at its deadline ---")
     m = quiet_mouth()
@@ -718,8 +765,8 @@ def worker_edges():
          mock.patch.object(sig, "feed_waveform"), \
          mock.patch.object(sig, "direction"):
         m = Mouth()
-        m._q.put(("", None))
-        m._q.put(("real.", None))
+        m._put("", None)
+        m._put("real.", None)
         deadline = time.time() + 5
         while not reply_done.called and time.time() < deadline:
             time.sleep(0.01)
@@ -1035,7 +1082,7 @@ def worker_keeps_talking():
     def play(self, s, d=None):
         played.append(s)
         if len(played) == 1:
-            self._q.put(("chaser.", None))
+            self._put("chaser.", None)
 
     with mock.patch.object(Mouth, "_play_stream", new=play), \
          mock.patch.object(sig, "static_stop"), \
@@ -1078,6 +1125,7 @@ espeak_render()
 warm_and_kokoro()
 key_linux()
 wait_done_timeout()
+barge_in()
 worker_edges()
 teardown_errors()
 playback_edges()
