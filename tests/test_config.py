@@ -195,6 +195,46 @@ def test_bad_shapes_are_safe():
           cfg3["extra_dirs"] == [], cfg3["extra_dirs"])
 
 
+def test_numeric_settings_are_coerced():
+    print("\n--- numeric knobs are coerced; a bad one falls back ---")
+    cfg = load_with({"speed": "1.25", "opencode_port": "4600",
+                     "turn_timeout": True, "stt_min_rms": "loud"})
+    check("a number written as a string is honoured",
+          cfg["speed"] == 1.25, cfg["speed"])
+    check("an int default yields an int",
+          cfg["opencode_port"] == 4600
+          and isinstance(cfg["opencode_port"], int), cfg["opencode_port"])
+    check("a bool for a number falls back to the default",
+          cfg["turn_timeout"] == config.DEFAULTS["turn_timeout"],
+          cfg["turn_timeout"])
+    check("an unreadable number falls back to the default",
+          cfg["stt_min_rms"] == config.DEFAULTS["stt_min_rms"],
+          cfg["stt_min_rms"])
+
+
+def test_path_settings_tolerate_non_strings():
+    print("\n--- a non-string path setting cannot crash the load ---")
+    cfg = load_with({"agent_dir": 5, "thinking_sound": ["x"],
+                     "barehands_state_dir": 7, "extra_dirs": [1, "~/notes"]})
+    check("a non-string agent_dir falls back to home",
+          cfg["agent_dir"] == os.path.expanduser("~"), cfg["agent_dir"])
+    check("a non-string thinking_sound is emptied",
+          cfg["thinking_sound"] == "", cfg["thinking_sound"])
+    check("a non-string barehands dir is emptied",
+          cfg["barehands_state_dir"] == "", cfg["barehands_state_dir"])
+    check("a non-string extra_dir becomes empty, not a crash",
+          cfg["extra_dirs"] == ["", os.path.expanduser("~/notes")],
+          cfg["extra_dirs"])
+
+
+def test_elevenlabs_must_stay_a_table():
+    print("\n--- elevenlabs is forced back to a table ---")
+    cfg = load_with({"elevenlabs": None})
+    check("a null elevenlabs becomes the default table",
+          isinstance(cfg["elevenlabs"], dict)
+          and cfg["elevenlabs"]["enabled"] is False, cfg["elevenlabs"])
+
+
 print("=" * 66)
 print("CONFIG")
 print("=" * 66)
@@ -209,6 +249,9 @@ test_derived_fields()
 test_open_mic_greeting()
 test_discipline_append_is_applied()
 test_bad_shapes_are_safe()
+test_numeric_settings_are_coerced()
+test_path_settings_tolerate_non_strings()
+test_elevenlabs_must_stay_a_table()
 
 print("\n" + "=" * 66)
 print("CONFIG OK" if not FAILURES else "CONFIG FAILURES: %s" % FAILURES)

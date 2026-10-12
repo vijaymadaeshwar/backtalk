@@ -462,8 +462,27 @@ DISCIPLINE = DISCIPLINE + " " + (
 )
 
 
-def _expand(p: str) -> str:
-    return os.path.expanduser(p) if p else p
+def _expand(p) -> str:
+    # A non-string (a number, a list, a null) is a config slip, not a path:
+    # return "" instead of letting expanduser raise at import, which would
+    # take the whole voice line down over one bad character in the file.
+    return os.path.expanduser(p) if isinstance(p, str) else ""
+
+
+def _num(value, default):
+    """Read a numeric setting, keeping the default's type.
+
+    A number written as a string ("1.25") is honoured -- hand-edited JSON
+    often is one. A bool, or anything that will not read as a number, falls
+    back to the default, so a typo in backtalk.json blinds a single knob
+    instead of crashing the voice line the moment the value is read (the
+    mic loop reads several of these live)."""
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value) if isinstance(default, int) else float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def load() -> dict:
@@ -487,6 +506,16 @@ def load() -> dict:
     except ValueError as e:
         print(f"[config] backtalk.json is not valid JSON ({e}) — "
               f"using defaults", flush=True)
+    # Normalise the risky shapes ONCE, here, so no reader has to defend
+    # itself. Every numeric knob becomes the type its default is (or falls
+    # back), and the ElevenLabs settings are guaranteed to stay a table --
+    # a user writing `"elevenlabs": null` would otherwise turn every
+    # CFG["elevenlabs"].get(...) into an AttributeError at speech time.
+    for _key, _default in DEFAULTS.items():
+        if isinstance(_default, (int, float)) and not isinstance(_default, bool):
+            cfg[_key] = _num(cfg.get(_key, _default), _default)
+    if not isinstance(cfg.get("elevenlabs"), dict):
+        cfg["elevenlabs"] = json.loads(json.dumps(DEFAULTS["elevenlabs"]))
     # A privacy option that silently does nothing is worse than having none,
     # so visible_skills was removed rather than left looking like protection.
     # It promised to keep skill DESCRIPTIONS out of the session's system
@@ -497,7 +526,7 @@ def load() -> dict:
         print("[config] visible_skills is set in backtalk.json but is NOT "
               "implemented: skill descriptions are still visible to the "
               "session. Remove the key, it does nothing.", flush=True)
-    cfg["agent_dir"] = _expand(cfg["agent_dir"])
+    cfg["agent_dir"] = _expand(cfg.get("agent_dir")) or os.path.expanduser("~")
     # A string here would be iterated character by character, quietly
     # granting ~ and / (and every letter) as accessible dirs; only a real
     # list is honoured.
