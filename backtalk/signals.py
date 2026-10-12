@@ -287,6 +287,33 @@ def caption_clear():
         pass
 
 
+_HEARD_FILE = os.path.join(_DIR, ".voice_heard")
+
+
+def heard(text: str, final: bool = False):
+    """The words being heard as they arrive, for a face to caption live.
+
+    caption() is what the agent is SAYING; this is what it is HEARING. A
+    partial transcript lands here while the person is still talking (see
+    ears.PartialStream), so a display can show the words build up instead
+    of waiting for the whole turn. `final` marks the finished transcript,
+    which may differ from the last partial. Never raises."""
+    try:
+        with open(_HEARD_FILE, "w") as f:
+            f.write(json.dumps({"ts": time.time(), "text": text or "",
+                                "final": bool(final)}))
+    except OSError:
+        pass
+
+
+def heard_clear():
+    """Drop the heard line once the turn is taken over."""
+    try:
+        os.remove(_HEARD_FILE)
+    except OSError:
+        pass
+
+
 _ACTIVE_FILE = os.path.join(_DIR, ".voice_active_window")
 
 

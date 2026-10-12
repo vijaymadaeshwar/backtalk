@@ -709,14 +709,14 @@ class _LoopEars:
         self.calls = 0
         self.fail_first = fail_first
 
-    def listen_once(self, gate=None, abort=None):
+    def listen_once(self, gate=None, abort=None, on_partial=None):
         self.calls += 1
         time.sleep(0.01)
         if self.calls <= self.fail_first:
             raise RuntimeError("mic gone")
         return None
 
-    def wait_for_wake(self, phrases, gate=None, abort=None):
+    def wait_for_wake(self, phrases, gate=None, abort=None, on_partial=None):
         return None
 
 
@@ -871,11 +871,11 @@ class _WakeEars(_LoopEars):
         self._then = then
         self._n = 0
 
-    def wait_for_wake(self, phrases, gate=None, abort=None):
+    def wait_for_wake(self, phrases, gate=None, abort=None, on_partial=None):
         self._n += 1
         return self._wake if self._n == 1 else None
 
-    def listen_once(self, gate=None, abort=None):
+    def listen_once(self, gate=None, abort=None, on_partial=None):
         self.calls += 1
         return self._then if self._n == 1 else None
 
@@ -888,7 +888,7 @@ class _QuitEars(_LoopEars):
         self._text = text
         self._said = False
 
-    def listen_once(self, gate=None, abort=None):
+    def listen_once(self, gate=None, abort=None, on_partial=None):
         self.calls += 1
         if not self._said:
             self._said = True
@@ -899,7 +899,7 @@ class _QuitEars(_LoopEars):
 class _BadDeviceEars(_LoopEars):
     """Every capture fails with a device-level error."""
 
-    def listen_once(self, gate=None, abort=None):
+    def listen_once(self, gate=None, abort=None, on_partial=None):
         self.calls += 1
         raise RuntimeError("invalid device")
 
@@ -935,7 +935,7 @@ class _TimedPress(_FakePTT):
 class _StaleCaptureEars(_LoopEars):
     """A capture slow enough to resolve only after a live mode switch."""
 
-    def listen_once(self, gate=None, abort=None):
+    def listen_once(self, gate=None, abort=None, on_partial=None):
         self.calls += 1
         time.sleep(0.4)
         return None
@@ -944,7 +944,7 @@ class _StaleCaptureEars(_LoopEars):
 class _InstantEars(_LoopEars):
     """A capture that resolves the instant it is asked."""
 
-    def listen_once(self, gate=None, abort=None):
+    def listen_once(self, gate=None, abort=None, on_partial=None):
         self.calls += 1
         return None
 
@@ -965,7 +965,7 @@ class _KbBrain(_LoopBrain):
         raise KeyboardInterrupt
 
 
-def _noop_record(is_held, on_release=None):
+def _noop_record(is_held, on_release=None, on_partial=None):
     if on_release:
         on_release()
     return ""
@@ -1008,7 +1008,7 @@ class _FakeScreen:
 class _QuietEars(_LoopEars):
     """A mic that stays silent through a whole check-in window."""
 
-    def listen_once(self, gate=None, abort=None):
+    def listen_once(self, gate=None, abort=None, on_partial=None):
         self.calls += 1
         time.sleep(0.5)
         return None
@@ -1031,11 +1031,11 @@ class _FollowEars(_LoopEars):
         self.text = text
         self.direct = 0
 
-    def wait_for_wake(self, phrases, gate=None, abort=None):
+    def wait_for_wake(self, phrases, gate=None, abort=None, on_partial=None):
         time.sleep(0.05)
         return None
 
-    def listen_once(self, gate=None, abort=None):
+    def listen_once(self, gate=None, abort=None, on_partial=None):
         self.calls += 1
         self.direct += 1
         time.sleep(0.05)
@@ -1245,7 +1245,7 @@ def amain_loop():
     def make_rec():
         state = {"n": 0}
 
-        def rec(is_held, on_release=None):
+        def rec(is_held, on_release=None, on_partial=None):
             state["n"] += 1
             if on_release:
                 on_release()
@@ -1340,7 +1340,7 @@ def amain_loop():
     check("a quit phrase captured by the open mic hangs up",
           res_q["exit"] is None and not res_q["timeout"], res_q)
 
-    def rec_boom(is_held, on_release=None):
+    def rec_boom(is_held, on_release=None, on_partial=None):
         if on_release:
             on_release()
         raise RuntimeError("invalid device")
@@ -1352,7 +1352,7 @@ def amain_loop():
     check("a device failure during a held key is spoken plainly",
           res_rb["exit"] is None and not res_rb["timeout"], res_rb)
 
-    def rec_boom_hard(is_held, on_release=None):
+    def rec_boom_hard(is_held, on_release=None, on_partial=None):
         if on_release:
             on_release()
         raise RuntimeError("strange")
@@ -1370,7 +1370,7 @@ def amain_loop():
     check("the signoff still plays",
           "Bye." in mouth_cf.said, mouth_cf.said)
 
-    def rec_quit(is_held, on_release=None):
+    def rec_quit(is_held, on_release=None, on_partial=None):
         if on_release:
             on_release()
         return "goodbye seyon"
@@ -1384,7 +1384,7 @@ def amain_loop():
     check("the signoff still plays",
           "Bye." in mouth_cf.said, mouth_cf.said)
 
-    def rec_hangup(is_held, on_release=None):
+    def rec_hangup(is_held, on_release=None, on_partial=None):
         if on_release:
             on_release()
         return "goodbye seyon"
@@ -1750,6 +1750,24 @@ def recall():
           res2["exit"] is None and not res2["timeout"], res2)
 
 
+def partial_caption():
+    print("\n--- amain: partial_stt wires the heard line, then clears it ---")
+    mouth, _, res = _run_amain(
+        ["hello there", "goodbye seyon"],
+        cfg_extra={"partial_stt": True})
+    check("the partial-stt run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    check("each taken turn clears the heard line",
+          _LAST_SIGNALS.heard_clear.called)
+
+    mouth2, _, res2 = _run_amain(
+        ["hello there", "goodbye seyon"],
+        cfg_extra={"partial_stt": False})
+    check("with partial_stt off, the heard line is left alone",
+          res2["exit"] is None and not res2["timeout"]
+          and not _LAST_SIGNALS.heard_clear.called, res2)
+
+
 def check_in_quiet_and_pause():
     print("\n--- amain: quiet hours and a spoken pause hold check-ins ---")
     # A spoken "stay quiet" must stop a check-in that would otherwise fire.
@@ -2088,6 +2106,7 @@ board_control_text()
 board_control()
 recall_text()
 recall()
+partial_caption()
 check_in()
 check_in_prompt_activity()
 check_in_defer()

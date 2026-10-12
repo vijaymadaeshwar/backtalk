@@ -268,6 +268,14 @@ DEFAULTS = {
     # that score. OPEN-MIC only -- hold-to-talk records what you chose.
     # 0 disables it.
     "stt_no_speech_prob": 0.5,
+    # Partial transcription: while you are still talking, transcribe the
+    # audio so far on an interval and publish it to the signal bus
+    # (.voice_heard), so a face can caption the words as they are heard
+    # instead of after the whole turn. Off by default -- each partial is a
+    # whisper call, real CPU on a machine that may not want the extra
+    # work. partial_stt_ms is how often a partial fires, in milliseconds.
+    "partial_stt": False,
+    "partial_stt_ms": 700,
     # Barge-in: if true, listen while speaking (open mic) so a new
     # utterance interrupts the reply as soon as it is detected.
     "barge_in": False,

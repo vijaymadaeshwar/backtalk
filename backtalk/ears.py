@@ -31,6 +31,7 @@ import platform
 import re
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -548,6 +549,104 @@ def _min_speech_frames() -> int:
     return max(8, int(ms / FRAME_MS))
 
 
+PARTIAL_MIN_FRAMES = 6      # ~180ms of audio before a partial is worth it
+
+
+def _partial_interval() -> float:
+    """Seconds between partial transcripts while a person is still talking.
+
+    Config is in milliseconds; a floor keeps it from firing faster than the
+    model can return, which would only queue partials behind the audio."""
+    ms = float(CFG.get("partial_stt_ms", 700) or 0)
+    return max(0.2, ms / 1000)
+
+
+class PartialStream:
+    """Partial transcripts of an utterance that is still being recorded.
+
+    The capture loop hands every frame to push(); a background ticker calls
+    tick() on an interval. tick() decides, purely, whether the buffer is
+    worth transcribing yet and emits the growing text, so a face can caption
+    the words as they are HEARD rather than after the whole turn. The
+    throttle is the point: every pass is a whisper call, and a partial that
+    fires faster than the model returns only piles work behind the audio.
+
+    The decision logic is pure and single-threaded (the ticker is the only
+    concurrency), so it is testable with no mic and no model."""
+
+    def __init__(self, transcribe, emit, interval: float | None = None,
+                 min_frames: int = PARTIAL_MIN_FRAMES,
+                 clock: Callable[[], float] = time.monotonic):
+        self._transcribe = transcribe
+        self._emit = emit
+        self._interval = _partial_interval() if interval is None else interval
+        self._min_frames = min_frames
+        self._clock = clock
+        self._frames: list[np.ndarray] = []
+        self._last_at = 0.0
+        self._last_text = ""
+        self._first = True
+
+    def push(self, frame: np.ndarray) -> None:
+        self._frames.append(frame)
+
+    def reset(self) -> None:
+        """Forget the audio so far -- used when a capture turns out to be
+        noise, so the next real utterance starts a fresh partial."""
+        self._frames.clear()
+        self._last_text = ""
+        self._first = True
+
+    def tick(self) -> str | None:
+        """One partial transcribe, if the buffer is ripe. Returns the text
+        emitted, else None. An unchanged reading is never re-emitted."""
+        if len(self._frames) < self._min_frames:
+            return None
+        now = self._clock()
+        if not self._first and now - self._last_at < self._interval:
+            return None
+        self._first = False
+        self._last_at = now
+        text = self._transcribe(np.concatenate(self._frames))
+        if text and text != self._last_text:
+            self._last_text = text
+            self._emit(text)
+            return text
+        return None
+
+
+class PartialTicker:
+    """Drives a PartialStream from its own thread.
+
+    The capture loop must never wait on whisper, so the partials run here:
+    frames keep filling on the capture thread while this one transcribes
+    snapshots. It is stopped and joined before the final transcript, so the
+    model is never asked to decode two clips at once."""
+
+    def __init__(self, stream: PartialStream, poll: float = 0.05):
+        self._stream = stream
+        self._poll = poll
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="bt-partial",
+                                        daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._poll):
+            self._stream.tick()
+
+    def stop(self) -> None:
+        """Idempotent: safe to call from both the success path and the
+        finally, which is how every other exit is covered."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+
+
 class Ears:
     def __init__(self, aggressiveness: int = 3, silence_ms: int = 300):
         # 3 is the strictest level: it takes clearer speech to open the
@@ -558,12 +657,17 @@ class Ears:
         self.silence_frames = silence_ms // FRAME_MS
 
     def listen_once(self, gate=None, timeout_s: float | None = None,
-                    abort=None) -> str | None:
+                    abort=None, on_partial=None) -> str | None:
         """Block until one utterance completes; return transcript
         (or None on timeout). An `abort` callable is checked every
         frame; returning True closes the mic and returns None, which
         is how a live switch back to push-to-talk shuts the open mic
-        down promptly instead of after one more utterance."""
+        down promptly instead of after one more utterance.
+
+        on_partial, when given, receives growing partial transcripts of the
+        utterance while it is still being spoken (see PartialStream), so a
+        face can caption the words live. It is stopped before the final
+        transcription so the model decodes one clip at a time."""
         frames: list[np.ndarray] = []
         ring: list[np.ndarray] = []   # pre-roll so the first syllable survives
         speech_run = 0
@@ -573,60 +677,79 @@ class Ears:
         in_utterance = False
         elapsed = 0.0
 
-        with _open_mic() as stream:
-            while True:
-                block, _ = stream.read(FRAME_LEN)
-                elapsed += FRAME_MS / 1000
-                if abort and abort():
-                    return None
-                if timeout_s and elapsed > timeout_s and not in_utterance:
-                    return None
-                mono = block[:, 0].copy()
-                if gate and gate():
-                    # speakers are talking and barge-in isn't on: ignore
-                    ring.clear()
-                    continue
-                is_speech = self.vad.is_speech(mono.tobytes(), RATE)
-                if not in_utterance:
-                    ring.append(mono)
-                    if len(ring) > 8:
-                        ring.pop(0)
-                    speech_run = speech_run + 1 if is_speech else 0
-                    if speech_run >= OPEN_FRAMES:
-                        in_utterance = True
-                        frames = ring[:]
-                        silence_run = 0
-                else:
-                    frames.append(mono)
-                    if is_speech:
-                        speech_total += 1
-                        speech_rms_sum += _rms(mono)
-                        silence_run = 0
+        partial = (PartialStream(transcribe, on_partial)
+                   if on_partial is not None else None)
+        ticker = PartialTicker(partial) if partial is not None else None
+        if ticker is not None:
+            ticker.start()
+        try:
+            with _open_mic() as stream:
+                while True:
+                    block, _ = stream.read(FRAME_LEN)
+                    elapsed += FRAME_MS / 1000
+                    if abort and abort():
+                        return None
+                    if timeout_s and elapsed > timeout_s and not in_utterance:
+                        return None
+                    mono = block[:, 0].copy()
+                    if gate and gate():
+                        # speakers are talking and barge-in isn't on: ignore
+                        ring.clear()
+                        continue
+                    is_speech = self.vad.is_speech(mono.tobytes(), RATE)
+                    if not in_utterance:
+                        ring.append(mono)
+                        if len(ring) > 8:
+                            ring.pop(0)
+                        speech_run = speech_run + 1 if is_speech else 0
+                        if speech_run >= OPEN_FRAMES:
+                            in_utterance = True
+                            frames = ring[:]
+                            if partial is not None:
+                                for f in frames:
+                                    partial.push(f)
+                            silence_run = 0
                     else:
-                        silence_run += 1
-                    if silence_run >= self.silence_frames or \
-                       len(frames) * FRAME_MS / 1000 > MAX_UTTER_S:
-                        mean_rms = speech_rms_sum / speech_total \
-                            if speech_total else 0.0
-                        min_frames = _min_speech_frames()
-                        if speech_total < min_frames or \
-                           not speech_is_audible(mean_rms):
-                            # Too short to be a phrase, or too quiet to be
-                            # a person: a noise blip, not a sentence. Keep
-                            # listening rather than hand it to whisper,
-                            # which would invent words over the hum.
-                            if speech_total >= min_frames:
-                                log(f"[ears] dropped a {mean_rms:.0f}-rms "
-                                    f"blip as room noise")
-                            in_utterance = False
-                            frames, ring = [], []
-                            speech_run = speech_total = 0
-                            speech_rms_sum = 0.0
-                            continue
-                        return transcribe(np.concatenate(frames),
-                                          gate_no_speech=True)
+                        frames.append(mono)
+                        if partial is not None:
+                            partial.push(mono)
+                        if is_speech:
+                            speech_total += 1
+                            speech_rms_sum += _rms(mono)
+                            silence_run = 0
+                        else:
+                            silence_run += 1
+                        if silence_run >= self.silence_frames or \
+                           len(frames) * FRAME_MS / 1000 > MAX_UTTER_S:
+                            mean_rms = speech_rms_sum / speech_total \
+                                if speech_total else 0.0
+                            min_frames = _min_speech_frames()
+                            if speech_total < min_frames or \
+                               not speech_is_audible(mean_rms):
+                                # Too short to be a phrase, or too quiet to be
+                                # a person: a noise blip, not a sentence. Keep
+                                # listening rather than hand it to whisper,
+                                # which would invent words over the hum.
+                                if speech_total >= min_frames:
+                                    log(f"[ears] dropped a {mean_rms:.0f}-rms "
+                                        f"blip as room noise")
+                                in_utterance = False
+                                frames, ring = [], []
+                                speech_run = speech_total = 0
+                                speech_rms_sum = 0.0
+                                if partial is not None:
+                                    partial.reset()
+                                continue
+                            if ticker is not None:
+                                ticker.stop()
+                            return transcribe(np.concatenate(frames),
+                                              gate_no_speech=True)
+        finally:
+            if ticker is not None:
+                ticker.stop()
 
-    def wait_for_wake(self, phrases, gate=None, abort=None) -> str | None:
+    def wait_for_wake(self, phrases, gate=None, abort=None,
+                      on_partial=None) -> str | None:
         """Block until an utterance contains a wake phrase; return it.
 
         Reuses the same VAD endpointer as listen_once, so a wake-word
@@ -636,7 +759,8 @@ class Ears:
         carry the command in the same breath ("hey seyon, what's it
         doing"), and the caller strips the phrase with strip_wake()."""
         while True:
-            text = self.listen_once(gate=gate, abort=abort)
+            text = self.listen_once(gate=gate, abort=abort,
+                                    on_partial=on_partial)
             if text is None:
                 return None
             if is_wake(text, phrases):
@@ -651,26 +775,42 @@ class Ears:
 
 
 def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25,
-                on_release: Callable[[], None] | None = None) -> str | None:
+                on_release: Callable[[], None] | None = None,
+                on_partial=None) -> str | None:
     """Hold-to-talk capture: record raw audio while is_held() is True,
     then transcribe. The button is the VAD — no endpointing. Returns
-    None for taps shorter than min_s (accidental presses)."""
+    None for taps shorter than min_s (accidental presses).
+
+    on_partial, when given, shows the words as they are spoken during the
+    hold (see PartialStream) instead of only after the key comes up."""
     frames: list[np.ndarray] = []
-    with _open_mic() as stream:
-        while is_held() and len(frames) * FRAME_MS / 1000 < max_s:
-            block, _ = stream.read(FRAME_LEN)
-            frames.append(block[:, 0].copy())
-        # Fires the instant the key comes up -- before the tail frames
-        # and the transcription, not after them. The person already
-        # thinks of themselves as done talking, so the UI moves on with
-        # them. Reaching the time cap fires it too: the turn proceeds
-        # either way, and leaving the UI waiting would be the wrong story.
-        if on_release is not None:
-            on_release()
-        # a small tail so the last word isn't clipped at release
-        for _ in range(6):
-            block, _ = stream.read(FRAME_LEN)
-            frames.append(block[:, 0].copy())
+    partial = (PartialStream(transcribe, on_partial)
+               if on_partial is not None else None)
+    ticker = PartialTicker(partial) if partial is not None else None
+    if ticker is not None:
+        ticker.start()
+    try:
+        with _open_mic() as stream:
+            while is_held() and len(frames) * FRAME_MS / 1000 < max_s:
+                block, _ = stream.read(FRAME_LEN)
+                mono = block[:, 0].copy()
+                frames.append(mono)
+                if partial is not None:
+                    partial.push(mono)
+            # Fires the instant the key comes up -- before the tail frames
+            # and the transcription, not after them. The person already
+            # thinks of themselves as done talking, so the UI moves on with
+            # them. Reaching the time cap fires it too: the turn proceeds
+            # either way, and leaving the UI waiting would be the wrong story.
+            if on_release is not None:
+                on_release()
+            # a small tail so the last word isn't clipped at release
+            for _ in range(6):
+                block, _ = stream.read(FRAME_LEN)
+                frames.append(block[:, 0].copy())
+    finally:
+        if ticker is not None:
+            ticker.stop()
     if len(frames) * FRAME_MS / 1000 < min_s:
         return None
     return transcribe(np.concatenate(frames))

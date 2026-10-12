@@ -59,6 +59,20 @@ signals.caption_clear()
 check("caption_clear removes the file",
       not os.path.exists(os.path.join(_TMP, ".voice_caption")))
 
+signals.heard("what time is", final=False)
+hrd = json.loads(read(os.path.join(_TMP, ".voice_heard")))
+check("heard carries the in-progress words",
+      hrd["text"] == "what time is" and hrd["final"] is False and "ts" in hrd, hrd)
+signals.heard("what time is it", final=True)
+check("heard marks the final transcript",
+      json.loads(read(os.path.join(_TMP, ".voice_heard")))["final"] is True)
+signals.heard("")
+check("heard writes an empty line as an empty string",
+      json.loads(read(os.path.join(_TMP, ".voice_heard")))["text"] == "")
+signals.heard_clear()
+check("heard_clear removes the file",
+      not os.path.exists(os.path.join(_TMP, ".voice_heard")))
+
 signals.active_window("code.exe \u2014 main.py")
 aw = json.loads(read(os.path.join(_TMP, ".voice_active_window")))
 check("active window carries the label",
@@ -127,6 +141,7 @@ with mock.patch.object(signals, "_STATE_FILE", _TMP), \
      mock.patch.object(signals, "_BH_WAVE", _TMP), \
      mock.patch.object(signals, "_BH_WAVE", _TMP), \
      mock.patch.object(signals, "_CAPTION_FILE", _TMP), \
+     mock.patch.object(signals, "_HEARD_FILE", _TMP), \
      mock.patch.object(signals, "_ACTIVE_FILE", _TMP):
     signals.set_state("x")
     signals.direction(["<<a>>"])
@@ -137,6 +152,8 @@ with mock.patch.object(signals, "_STATE_FILE", _TMP), \
     signals.feed_waveform(pcm)
     signals.caption("x")
     signals.caption_clear()
+    signals.heard("x")
+    signals.heard_clear()
     signals.active_window("x")
 check("an unwritable bus path never raises", True)
 

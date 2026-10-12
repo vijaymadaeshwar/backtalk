@@ -1084,6 +1084,10 @@ async def amain():
         log("[backtalk] wake_word is on but wake_word_phrases is empty; "
             "ignoring wake word")
         wake_word = False
+    # Partial transcription: while you talk, growing transcripts go to the
+    # bus so a face can caption the words live. None unless asked for, so
+    # nothing pays the extra whisper work by default.
+    emit_partial = signals.heard if CFG.get("partial_stt") else None
     model = None
     if "--model" in sys.argv:
         try:
@@ -1397,6 +1401,11 @@ async def amain():
         nonlocal speak_task
         _ACTIVITY["at"] = time.monotonic()
         log(f"[you]    {text}")
+        # The turn is taken over: drop the partial-transcript line that was
+        # building during the capture, so the next utterance starts a fresh
+        # hearing line instead of leaving a stale one on the bus.
+        if emit_partial is not None:
+            signals.heard_clear()
         # ENGLISH ONLY. The ear keeps hearing whatever the room says --
         # Tamil, Hindi, anything -- but this assistant answers in
         # English every time: one language, one voice. The prompt says
@@ -1613,16 +1622,20 @@ async def amain():
             so answering is a conversation rather than a summoning."""
             ab = lambda: _MIC["gen"] != g
             if not (wake_word and _MIC["mode"] == "open"):
-                return (g, ears.listen_once(gate=mic_gate, abort=ab))
+                return (g, ears.listen_once(gate=mic_gate, abort=ab,
+                                            on_partial=emit_partial))
             if time.monotonic() < _FOLLOWUP["until"]:
-                return (g, ears.listen_once(gate=mic_gate, abort=ab))
-            woke = ears.wait_for_wake(wake_phrases, gate=mic_gate, abort=ab)
+                return (g, ears.listen_once(gate=mic_gate, abort=ab,
+                                            on_partial=emit_partial))
+            woke = ears.wait_for_wake(wake_phrases, gate=mic_gate, abort=ab,
+                                      on_partial=emit_partial)
             if woke is None:
                 return (g, None)
             cmd = strip_wake(woke, wake_phrases)
             if cmd:
                 return (g, cmd)          # "hey seyon, what's the weather"
-            return (g, ears.listen_once(gate=mic_gate, abort=ab))
+            return (g, ears.listen_once(gate=mic_gate, abort=ab,
+                                        on_partial=emit_partial))
 
         mic_fails = 0
         while True:
@@ -1737,7 +1750,8 @@ async def amain():
                     text = await loop.run_in_executor(
                         _BLOCKERS, lambda: record_held(
                             ptt.is_held,
-                            on_release=lambda: signals.set_state("thinking")))
+                            on_release=lambda: signals.set_state("thinking"),
+                            on_partial=emit_partial))
                 except Exception as e:
                     # A device-level failure gets plain words instead of a
                     # raw exception. The pre-flight at startup cannot catch
