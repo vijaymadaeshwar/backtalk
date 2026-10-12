@@ -355,11 +355,13 @@ DEFAULTS = {
     # it does nothing until a print is enrolled by running the line with
     # --enroll. speaker_profile is where the print is kept ("" = a file
     # under ~/.backtalk). speaker_threshold is the cosine floor a clip
-    # must clear to count as you: raise it to be stricter, lower it if the
-    # gate turns you away. Classic DSP, not a security boundary.
+    # must clear to count as you; leave it null to use the floor the
+    # enrollment chose from how consistent your own takes were, or set a
+    # number to override it (higher = stricter). Classic DSP, not a
+    # security boundary.
     "speaker_id": False,
     "speaker_profile": "",
-    "speaker_threshold": 0.75,
+    "speaker_threshold": None,
     "speaker_enroll_seconds": 3.0,
     # Sound played while the agent thinks, so a long pause never reads as
     # a dead line. The bundled one ships in assets/; a relative path

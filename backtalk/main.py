@@ -180,10 +180,36 @@ async def _run_enroll(ears, mouth):
                   "Let's try again when it's quieter.")
         mouth.wait_done(timeout=30)
         return False
-    voiceprint.save_profile(path, vec)
+    thr = voiceprint.self_threshold(vectors)
+    voiceprint.save_profile(path, vec, threshold=thr)
     mouth.say("Enrolled. I will answer only to you now.")
     mouth.wait_done(timeout=30)
     return True
+
+
+async def _run_whoami(ears, mouth):
+    """Say how well the current voice matches the enrolled print, without
+    arming the gate. A person can hear the score and the floor before
+    trusting the gate with a room. Returns after one clip."""
+    loop = asyncio.get_event_loop()
+    speaker = voiceprint.load_speaker(CFG)
+    if speaker is None:
+        mouth.say("I have not learned your voice yet. Run with --enroll "
+                  "first, then ask me again.")
+        mouth.wait_done(timeout=30)
+        return
+    seconds = float(CFG.get("speaker_enroll_seconds", 3.0))
+    mouth.say("Say a sentence and I'll tell you how well I know this voice.")
+    mouth.wait_done(timeout=30)
+    pcm = await loop.run_in_executor(_BLOCKERS, ears.record_clip, seconds)
+    score = speaker.score(pcm)
+    if score is None:
+        mouth.say("I did not catch enough of your voice to judge.")
+    else:
+        verdict = "that's you" if score >= speaker.threshold else "not quite you"
+        mouth.say(f"Your voice scored {score:.2f} against a floor of "
+                  f"{speaker.threshold:.2f}, so {verdict}.")
+    mouth.wait_done(timeout=30)
 
 
 def _deny_pending(reason=_INTERRUPT_ANSWER):
@@ -1156,6 +1182,10 @@ async def amain():
     if "--enroll" in sys.argv:
         # Records a few short phrases to learn your voice, then exits.
         await _run_enroll(ears, mouth)
+        return
+    if "--whoami" in sys.argv:
+        # Scores one clip against the print without arming the gate, then exits.
+        await _run_whoami(ears, mouth)
         return
     brain = WarmBrain(model=model,
                        can_use_tool=make_permission_gate(mouth),

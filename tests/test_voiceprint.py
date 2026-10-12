@@ -216,6 +216,34 @@ def test_load_speaker():
         spc = vp.load_speaker({"speaker_profile": p, "speaker_threshold": 0.5})
         check("a good threshold is honored", spc is not None
               and spc.threshold == 0.5)
+        vp.save_profile(p, vp.feature(_voiced(1, 0.9)), threshold=0.83)
+        spt = vp.load_speaker({"speaker_profile": p})
+        check("the enrollment's own floor is used by default",
+              spt is not None and spt.threshold == 0.83)
+        spd = vp.load_speaker({"speaker_profile": p,
+                               "speaker_threshold": "nonsense"})
+        check("a bad config floor falls back to the enrolled one",
+              spd is not None and spd.threshold == 0.83)
+
+
+def test_self_threshold():
+    print("\n--- the enrollment chooses its own floor ---")
+    a = vp.feature(_voiced(1, 0.9))
+    b = vp.feature(_voiced(2, 0.9))
+    check("too few takes -> no floor", vp.self_threshold([a, None]) is None)
+    check("fit refuses too few takes", vp.fit([a, None]) is None)
+    got = vp.fit([a, b])
+    check("fit returns a print and a floor", got is not None
+          and got[0].shape == (vp.FEATURE_DIM,)
+          and vp.SELF_FLOOR <= got[1] <= vp.SELF_CEILING)
+    check("a perfectly consistent speaker is capped at the ceiling",
+          vp.self_threshold([a, a, a]) == vp.SELF_CEILING)
+    z0 = np.zeros(vp.FEATURE_DIM)
+    z0[0] = 1.0
+    z1 = np.zeros(vp.FEATURE_DIM)
+    z1[1] = 1.0
+    check("a mismatched pair cannot open the gate wide",
+          vp.self_threshold([z0, z1]) == vp.SELF_FLOOR)
 
 
 def test_enroll():
@@ -229,7 +257,9 @@ def test_enroll():
 
     vec = vp.enroll(record, prompts=["a", "b"])
     check("two good takes build a print", vec is not None and
-          abs(float(np.linalg.norm(vec)) - 1.0) < 1e-9)
+          abs(float(np.linalg.norm(vec[0])) - 1.0) < 1e-9)
+    check("the print carries a self-chosen floor",
+          vec is not None and vp.SELF_FLOOR <= vec[1] <= vp.SELF_CEILING)
     check("record was called once per prompt", len(calls) == 2, calls)
 
     def one_short():
@@ -258,6 +288,7 @@ test_profile_roundtrip()
 test_default_profile()
 test_speaker()
 test_load_speaker()
+test_self_threshold()
 test_enroll()
 
 print("\n" + "=" * 66)

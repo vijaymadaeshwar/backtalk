@@ -1927,6 +1927,55 @@ def voice_enrollment():
           res["exit"] is None and not res["timeout"], res)
 
 
+def voice_whoami():
+    print("\n--- amain: --whoami reports the score without arming the gate ---")
+    clip = (np.random.default_rng(3).standard_normal(16000)
+            * 3000).astype(np.int16)
+    with tempfile.TemporaryDirectory() as td:
+        prof = os.path.join(td, "vp.json")
+        mouth, _, res = _run_amain([], argv=["--whoami"],
+                                   ears=_EnrollEars(),
+                                   cfg_extra={"speaker_profile": prof})
+        check("whoami with no print exits cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        check("whoami asks for an enrollment first",
+              any("not learned your voice" in s for s in mouth.said), mouth.said)
+
+    with tempfile.TemporaryDirectory() as td:
+        prof = os.path.join(td, "vp.json")
+        vp.save_profile(prof, vp.feature(clip), threshold=0.5)
+        mouth, _, res = _run_amain([], argv=["--whoami"],
+                                   ears=_EnrollEars(clip=clip),
+                                   cfg_extra={"speaker_profile": prof})
+        check("whoami with a print exits cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        check("whoami says a matching voice is the owner",
+              any("scored" in s and "that's you" in s for s in mouth.said),
+              mouth.said)
+
+    with tempfile.TemporaryDirectory() as td:
+        prof = os.path.join(td, "vp.json")
+        vp.save_profile(prof, vp.feature(clip), threshold=2.0)
+        mouth, _, res = _run_amain([], argv=["--whoami"],
+                                   ears=_EnrollEars(clip=clip),
+                                   cfg_extra={"speaker_profile": prof})
+        check("whoami says a below-floor voice is not the owner",
+              any("not quite you" in s for s in mouth.said), mouth.said)
+
+    with tempfile.TemporaryDirectory() as td:
+        prof = os.path.join(td, "vp.json")
+        vp.save_profile(prof, vp.feature(clip), threshold=0.5)
+        mouth, _, res = _run_amain(
+            [], argv=["--whoami"],
+            ears=_EnrollEars(clip=np.zeros(100, np.int16)),
+            cfg_extra={"speaker_profile": prof})
+        check("whoami with an unusable clip exits cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        check("whoami admits it could not judge",
+              any("enough of your voice to judge" in s for s in mouth.said),
+              mouth.said)
+
+
 def check_in():
     print("\n--- amain: the assistant can speak first ---")
     mouth, _, res = _run_amain(
@@ -2193,6 +2242,7 @@ board_control()
 recall_text()
 recall()
 voice_enrollment()
+voice_whoami()
 partial_caption()
 check_in()
 check_in_prompt_activity()

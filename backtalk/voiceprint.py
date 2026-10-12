@@ -54,6 +54,12 @@ ENROLL_PROMPTS = [
     "Please say: today is a good day to get some work done.",
 ]
 MIN_CLIPS = 2
+# The enrollment sets its own cosine floor from how consistent the speaker's
+# own takes were: a little below the weakest of them, so a real utterance is
+# still let through, but kept in a band that a room's voices do not reach.
+SELF_MARGIN = 0.08
+SELF_FLOOR = 0.45
+SELF_CEILING = 0.90
 
 
 def _hz2mel(f):
@@ -175,17 +181,47 @@ def combine(vectors) -> np.ndarray | None:
     return m / n if n > 0 else None
 
 
+def self_threshold(vectors) -> float | None:
+    """The cosine floor the enrollment picks for itself.
+
+    How alike the speaker's own takes were sets how strict the gate can be:
+    a floor a fixed margin below the weakest real pair still lets that
+    person through while a room's voices, which sit far lower, do not. A
+    floor and a ceiling keep a pathological enrollment (one take wildly off)
+    from making the gate impossible or a no-op."""
+    good = [v for v in vectors if v is not None]
+    if len(good) < MIN_CLIPS:
+        return None
+    sims = [similarity(good[i], good[j])
+            for i in range(len(good)) for j in range(i + 1, len(good))]
+    floor = min(sims) - SELF_MARGIN
+    return float(min(max(floor, SELF_FLOOR), SELF_CEILING))
+
+
+def fit(vectors):
+    """Combine takes into a print and the floor that came with it.
+
+    Returns (vector, threshold) or None if too few takes were usable."""
+    v = combine(vectors)
+    if v is None:
+        return None
+    thr = self_threshold(vectors)
+    assert thr is not None  # combine proved there are enough good takes
+    return v, thr
+
+
 def default_profile() -> str:
     """Where a print lives when the config names no file: beside the other
     user state, not in the repo."""
     return os.path.join(os.path.expanduser("~"), ".backtalk", "voiceprint.json")
 
 
-def save_profile(path: str, vector: np.ndarray, rate=RATE):
+def save_profile(path: str, vector: np.ndarray, rate=RATE, threshold=None):
     """Write the print. Never raises: a voice line that cannot save its
     print is worse off than one that silently does not gate."""
-    d = {"version": PROFILE_VERSION, "rate": rate,
-         "created": time.time(), "vector": np.asarray(vector).tolist()}
+    d = {"version": PROFILE_VERSION, "rate": rate, "created": time.time(),
+         "threshold": None if threshold is None else float(threshold),
+         "vector": np.asarray(vector).tolist()}
     try:
         parent = os.path.dirname(path)
         if parent:
@@ -198,8 +234,8 @@ def save_profile(path: str, vector: np.ndarray, rate=RATE):
         return False
 
 
-def load_vector(path: str) -> np.ndarray | None:
-    """Read a saved print, or None if it is missing or malformed."""
+def _read(path: str):
+    """Parse a saved print -> (vector, threshold) or None if missing/malformed."""
     try:
         with open(path) as f:
             d = json.load(f)
@@ -209,23 +245,31 @@ def load_vector(path: str) -> np.ndarray | None:
             log(f"[voiceprint] {path} is an old print; enroll again")
             return None
         v = np.asarray(d["vector"], dtype=np.float64)
-        return v if v.ndim == 1 and v.size == FEATURE_DIM else None
+        if v.ndim != 1 or v.size != FEATURE_DIM:
+            return None
+        return v, d.get("threshold")
     except (OSError, ValueError, TypeError, KeyError):
         return None
 
 
-def enroll(record_clip, prompts=ENROLL_PROMPTS) -> np.ndarray | None:
+def load_vector(path: str) -> np.ndarray | None:
+    """Read a saved print, or None if it is missing or malformed."""
+    got = _read(path)
+    return got[0] if got is not None else None
+
+
+def enroll(record_clip, prompts=ENROLL_PROMPTS):
     """Build a print from enrollment clips.
 
     record_clip is called once per prompt and must return a clip (int16
     mono at RATE) or None. Injectable so the flow is tested without a mic.
-    Returns None if too few clips were usable."""
+    Returns (vector, threshold) or None if too few clips were usable."""
     vectors = []
     for _ in prompts:
         pcm = record_clip()
         if pcm is not None:
             vectors.append(feature(pcm))
-    return combine(vectors)
+    return fit(vectors)
 
 
 class Speaker:
@@ -250,15 +294,29 @@ class Speaker:
         return s is not None and s >= self.threshold
 
 
+def _as_float(x):
+    """x as a float, or None. Keeps a hand-typed config from raising on a
+    bad floor; a None result just falls through to the next candidate."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
 def load_speaker(cfg) -> Speaker | None:
     """The enrolled speaker named by the config, or None if there is no
-    print yet (in which case nothing gates)."""
+    print yet (in which case nothing gates).
+
+    The floor is the one the enrollment chose, unless the config pins a
+    number, which then wins."""
     path = cfg.get("speaker_profile") or default_profile()
-    v = load_vector(path)
-    if v is None:
+    got = _read(path)
+    if got is None:
         return None
-    try:
-        thr = float(cfg.get("speaker_threshold", DEFAULT_THRESHOLD))
-    except (TypeError, ValueError):
+    v, tuned = got
+    thr = _as_float(cfg.get("speaker_threshold"))
+    if thr is None:
+        thr = _as_float(tuned)
+    if thr is None:
         thr = DEFAULT_THRESHOLD
     return Speaker(v, thr)
