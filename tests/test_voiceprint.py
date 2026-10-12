@@ -75,6 +75,22 @@ def test_feature():
           else float(np.linalg.norm(f)))
     check("a clip too short to print yields None",
           vp.feature(np.zeros(100, np.int16)) is None)
+    check("a loud clip with too few frames yields None",
+          vp.feature((np.ones(400, np.int16) * 5000)) is None)
+
+
+def test_silence_robustness():
+    print("\n--- the print ignores silence ---")
+    clean = _voiced(1, 0.9)
+    padded = np.concatenate([np.zeros(8000, np.int16), clean])
+    same = vp.similarity(vp.feature(clean), vp.feature(padded))
+    check("a leading pause barely moves the print", same > 0.99, round(same, 3))
+    mostly_quiet = np.zeros(16000, np.int16)
+    mostly_quiet[8000:8160] = 12000
+    check("an almost-silent clip keeps its few frames and still prints",
+          vp.feature(mostly_quiet) is not None)
+    check("sheer silence yields no print",
+          vp.feature(np.zeros(16000, np.int16)) is None)
 
 
 def test_similarity_orders_voices():
@@ -131,8 +147,17 @@ def test_profile_roundtrip():
 
         empty = os.path.join(td, "empty.json")
         with open(empty, "w") as fh:
-            json.dump({"version": 1}, fh)
+            json.dump({"version": vp.PROFILE_VERSION}, fh)
         check("a print with no vector is refused", vp.load_vector(empty) is None)
+
+        wrong = os.path.join(td, "wrong.json")
+        with open(wrong, "w") as fh:
+            json.dump({"version": vp.PROFILE_VERSION, "vector": [1.0, 2.0, 3.0]},
+                      fh)
+        check("a print of the wrong length is refused",
+              vp.load_vector(wrong) is None)
+        check("the wrong-length print is smaller than a real one",
+              vp.feature(_voiced(1, 0.9)).size == vp.FEATURE_DIM)
 
         check("saving onto a directory fails soft",
               vp.save_profile(td, f) is False)
@@ -221,6 +246,7 @@ print("=" * 66)
 test_filterbank()
 test_mfcc_shape()
 test_feature()
+test_silence_robustness()
 test_similarity_orders_voices()
 test_profile_roundtrip()
 test_default_profile()

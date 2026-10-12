@@ -138,6 +138,26 @@ def test_stream_reset():
     check("a reset forgets the audio", s.tick() is None)
 
 
+def test_stream_tick_survives_a_racing_reset():
+    print("\n--- PartialStream: a tick transcribes its own snapshot ---")
+    emitted = []
+    s = PartialStream(lambda p: "words", emitted.append, interval=0.0,
+                      min_frames=2)
+    for _ in range(3):
+        s.push(frame(1))
+
+    def racing(pcm):
+        s.reset()            # the capture thread clears the buffer mid-tick
+        return "words"
+
+    s._transcribe = racing
+    out = s.tick()
+    check("a reset during the transcribe does not break the tick",
+          out == "words" and emitted == ["words"], (out, emitted))
+    check("the race leaves the stream empty and re-usable",
+          s.tick() is None)
+
+
 def test_ticker():
     print("\n--- PartialTicker: drives the stream, stops clean ---")
     emitted = []
@@ -320,6 +340,7 @@ test_interval()
 test_stream_ranks()
 test_stream_quiet_and_repeat()
 test_stream_reset()
+test_stream_tick_survives_a_racing_reset()
 test_ticker()
 test_listen_once_partial()
 test_noise_resets_partial()

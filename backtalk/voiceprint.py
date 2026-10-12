@@ -3,10 +3,14 @@
 A speaker is verified by the shape of their voice, learned from a few
 enrolled clips and compared like a fingerprint. The features are MFCCs --
 the same mel-cepstrum classic speech systems have used for decades -- kept
-deliberately small (13 coefficients, mean and spread over the clip, one
-unit-normalised vector). Two recordings of one speaker sit close together;
-two people sit apart. Cosine similarity over that vector, against a
-threshold, is the whole decision.
+deliberately small: for each cepstral coefficient, its mean and spread over
+the clip, and the mean and spread of its frame-to-frame change (the deltas,
+which carry the way the mouth moves rather than a held vowel). Pauses are
+dropped first, so a recording is judged on the voice in it and not on how
+much silence surrounds it. That collapses to one unit-normalised vector;
+two recordings of one speaker sit close together, two people sit apart, and
+cosine similarity over the vector against a threshold is the whole
+decision.
 
 This is not a security boundary and is not sold as one: a close imitator or
 a good recording can pass it. It is a politeness gate -- the room's voices
@@ -35,8 +39,12 @@ N_CEPS = 13          # includes c0, which is dropped before comparing
 PREEMPH = 0.97
 FMIN = 50.0
 FMAX = 8000.0
-PROFILE_VERSION = 1
+PROFILE_VERSION = 2
 DEFAULT_THRESHOLD = 0.75
+SILENCE_DYN = 18.0    # frames this far below the loudest are pauses, not voice
+SILENCE_RMS = 50.0    # a clip this quiet overall carries no voice to print
+# mean and spread of the cepstra, and of the deltas between frames
+FEATURE_DIM = (N_CEPS - 1) * 4
 
 # The phrases read during enrollment. Ordinary sentences, varied vowels,
 # so the print sees the speaker's real mouth rather than one held note.
@@ -114,18 +122,39 @@ def mfcc(pcm, rate=RATE) -> np.ndarray:
     return ceps
 
 
+def _drop_silence(c, dyn=SILENCE_DYN):
+    """Keep only the frames that carry voice.
+
+    c0 is the frame's energy, so the frames well below the loudest are
+    pauses. Dropping them stops a silence-heavy recording (a slow enroller,
+    a clip with a pause at the front) from dragging the print toward the
+    room. If almost everything is quiet, keep the frames as they are rather
+    than throw the clip away."""
+    energy = c[:, 0]
+    keep = energy >= energy.max() - dyn
+    return c[keep] if int(keep.sum()) >= 4 else c
+
+
 def feature(pcm, rate=RATE) -> np.ndarray | None:
     """One unit-normalised voice vector for a clip, or None if too short.
 
-    The shape of the cepstrum over time -- the mean of each coefficient and
-    how it spreads -- is the print. c0 (frame energy) is dropped because it
-    tracks loudness, not the voice, and would make the print follow the
-    room instead of the person."""
-    c = mfcc(pcm, rate)[:, 1:]
-    if c.shape[0] < 4:
+    The print is the shape of the cepstrum over time and how it moves: the
+    mean and spread of each coefficient, and the mean and spread of the
+    deltas between frames. c0 (frame energy) is dropped because it tracks
+    loudness, not the voice, and would make the print follow the room
+    instead of the person. Pauses are dropped first for the same reason."""
+    x = np.asarray(pcm, dtype=np.float64)
+    if x.size == 0 or float(np.sqrt(np.mean(np.square(x)))) < SILENCE_RMS:
         return None
-    v = np.concatenate([c.mean(axis=0), c.std(axis=0)])
-    return v / float(np.linalg.norm(v))
+    c = mfcc(pcm, rate)
+    if c.shape[0] < 5:
+        return None
+    c = _drop_silence(c)[:, 1:]
+    d = np.diff(c, axis=0)
+    v = np.concatenate([c.mean(axis=0), c.std(axis=0),
+                        d.mean(axis=0), d.std(axis=0)])
+    n = float(np.linalg.norm(v))
+    return v / n if n > 0 else None
 
 
 def similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -178,7 +207,7 @@ def load_vector(path: str) -> np.ndarray | None:
             log(f"[voiceprint] {path} is an old print; enroll again")
             return None
         v = np.asarray(d["vector"], dtype=np.float64)
-        return v if v.ndim == 1 and v.size else None
+        return v if v.ndim == 1 and v.size == FEATURE_DIM else None
     except (OSError, ValueError, TypeError, KeyError):
         return None
 

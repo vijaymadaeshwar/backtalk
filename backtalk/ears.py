@@ -571,8 +571,11 @@ class PartialStream:
     throttle is the point: every pass is a whisper call, and a partial that
     fires faster than the model returns only piles work behind the audio.
 
-    The decision logic is pure and single-threaded (the ticker is the only
-    concurrency), so it is testable with no mic and no model."""
+    push and reset are called from the capture thread while tick runs on
+    the ticker thread, so all three take a lock and tick transcribes a
+    snapshot taken under it. That keeps the buffer from being cleared out
+    from under a tick, and keeps the capture loop from ever waiting on the
+    model (the transcribe runs with the lock released)."""
 
     def __init__(self, transcribe, emit, interval: float | None = None,
                  min_frames: int = PARTIAL_MIN_FRAMES,
@@ -582,34 +585,44 @@ class PartialStream:
         self._interval = _partial_interval() if interval is None else interval
         self._min_frames = min_frames
         self._clock = clock
+        self._lock = threading.Lock()
         self._frames: list[np.ndarray] = []
         self._last_at = 0.0
         self._last_text = ""
         self._first = True
 
     def push(self, frame: np.ndarray) -> None:
-        self._frames.append(frame)
+        with self._lock:
+            self._frames.append(frame)
 
     def reset(self) -> None:
         """Forget the audio so far -- used when a capture turns out to be
         noise, so the next real utterance starts a fresh partial."""
-        self._frames.clear()
-        self._last_text = ""
-        self._first = True
+        with self._lock:
+            self._frames.clear()
+            self._last_text = ""
+            self._first = True
 
     def tick(self) -> str | None:
         """One partial transcribe, if the buffer is ripe. Returns the text
         emitted, else None. An unchanged reading is never re-emitted."""
-        if len(self._frames) < self._min_frames:
-            return None
-        now = self._clock()
-        if not self._first and now - self._last_at < self._interval:
-            return None
-        self._first = False
-        self._last_at = now
-        text = self._transcribe(np.concatenate(self._frames))
-        if text and text != self._last_text:
-            self._last_text = text
+        with self._lock:
+            if len(self._frames) < self._min_frames:
+                return None
+            now = self._clock()
+            if not self._first and now - self._last_at < self._interval:
+                return None
+            self._first = False
+            self._last_at = now
+            frames = list(self._frames)
+            last = self._last_text
+        # Transcribe outside the lock: the capture thread must never block
+        # on whisper, and frames is a private snapshot so reset cannot pull
+        # the buffer out from under us.
+        text = self._transcribe(np.concatenate(frames))
+        if text and text != last:
+            with self._lock:
+                self._last_text = text
             self._emit(text)
             return text
         return None
