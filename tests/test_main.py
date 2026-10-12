@@ -1702,6 +1702,54 @@ def board_control():
           "clear the board" in brain3.got, brain3.got)
 
 
+def recall_text():
+    print("\n--- recall_request: the spoken recall ---")
+    r = btmain.recall_request
+    check("a remember-about question yields the topic",
+          r("what do you remember about the database") == "the database")
+    check("when-did-we-talk yields the topic",
+          r("when did we talk about kokoro") == "kokoro")
+    check("a last-talk question yields the topic",
+          r("when did we last talk about the billing plan")
+          == "the billing plan")
+    check("do-you-remember yields the topic",
+          r("do you remember postgres") == "postgres")
+    check("recall X yields the topic",
+          r("recall the billing plan") == "the billing plan")
+    check("a bare recall is nothing", r("recall") is None)
+    check("an ordinary question is not a recall",
+          r("how are you doing today") is None)
+
+
+def recall():
+    print("\n--- amain: a spoken recall reads the journal ---")
+    d = tempfile.mkdtemp(prefix="bt_main_recall_")
+    with open(os.path.join(d, "voice-session_2026-10-01_09-00-00.md"), "w",
+              encoding="utf-8") as f:
+        f.write("**you:** we should use postgres for billing\n")
+    mouth, _, res = _run_amain(
+        ["what do you remember about postgres", "hello there",
+         "goodbye seyon"], cfg_extra={"journal_dir": d})
+    check("the recall run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    check("the journal answer is spoken",
+          any(s.startswith("On 2026-10-01 09:00") for s in mouth.said),
+          mouth.said)
+    brain = _LoopBrain.instances[-1]
+    check("the recall never reached the brain",
+          "what do you remember about postgres" not in brain.got, brain.got)
+    check("ordinary talk still reaches the brain",
+          "hello there" in brain.got, brain.got)
+
+    mouth2, _, res2 = _run_amain(
+        ["what do you remember about postgres", "goodbye seyon"])
+    brain2 = _LoopBrain.instances[-1]
+    check("with no journal, a recall question is ordinary talk",
+          "what do you remember about postgres" in brain2.got, brain2.got)
+    check("the no-journal run hangs up cleanly",
+          res2["exit"] is None and not res2["timeout"], res2)
+
+
 def check_in_quiet_and_pause():
     print("\n--- amain: quiet hours and a spoken pause hold check-ins ---")
     # A spoken "stay quiet" must stop a check-in that would otherwise fire.
@@ -2038,6 +2086,8 @@ reminders()
 stop_words()
 board_control_text()
 board_control()
+recall_text()
+recall()
 check_in()
 check_in_prompt_activity()
 check_in_defer()

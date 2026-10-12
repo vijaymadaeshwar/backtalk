@@ -72,7 +72,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from backtalk import board, screen, signals
+from backtalk import board, recall, screen, signals
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
@@ -1012,6 +1012,28 @@ def _board_ack(cmd, ok):
     }.get(cmd.get("a"), "It's up on the board.")
 
 
+# The spoken openings that ask the agent to search its own journal. Matched
+# as starts-with after normalization, so the topic is whatever follows.
+_RECALL_ON = (
+    "what do you remember about", "what do you know about",
+    "when did we talk about", "when did we last talk about",
+    "when did i talk about", "what did we say about",
+    "what did i say about", "do you remember", "recall",
+    "search your journal for", "search the journal for",
+)
+
+
+def recall_request(text):
+    """Read a spoken journal-recall request. Returns the topic to search for,
+    or None when this is not a recall question. Pure, so the wording is easy
+    to test."""
+    norm = _norm_speech(text)
+    for p in _RECALL_ON:
+        if norm.startswith(p):
+            return norm[len(p):].strip() or None
+    return None
+
+
 async def journal_flush(journal: Journal, brain: WarmBrain):
     """Write the session down, then get out of the way.
 
@@ -1496,6 +1518,16 @@ async def amain():
             log(f"[board] {bc.get('a')} -> "
                 f"{'ok' if ok else 'unreachable'}")
             mouth.say(_board_ack(bc, ok))
+            signals.set_state("idle")
+            return True
+        # A spoken recall question ("what do you remember about X") searches
+        # the session journal here and answers aloud. Only claimed when a
+        # journal is configured; with none, it is an ordinary question.
+        rq = recall_request(text) if CFG["journal_dir"] else None
+        if rq:
+            line = recall.spoken(rq, CFG["journal_dir"])
+            log("[recall] answered from the journal")
+            mouth.say(line)
             signals.set_state("idle")
             return True
         verb = verb or console_match(text)
