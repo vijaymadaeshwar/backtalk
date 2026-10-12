@@ -68,6 +68,10 @@ def _wake_re(phrase: str) -> re.Pattern:
     phrase no longer matches anything.
     """
     words = [re.escape(w) for w in phrase.lower().split()]
+    if not words:
+        # A blank phrase must match nothing. Without this the pattern is
+        # "\b\b", which matches any word boundary -- i.e. every utterance.
+        return re.compile(r"(?!)")
     return re.compile(r"\b" + r"[\s,.\-!?]*".join(words) + r"\b",
                       re.IGNORECASE)
 
@@ -152,7 +156,8 @@ def _hf_cache_dir(name: str) -> Path:
     both spell the repo differently -- "medium" is really
     Systran/faster-whisper-medium -- so check every form.
     """
-    root = Path(os.path.expanduser(r"~\.cache\huggingface\hub"))
+    root = Path(os.path.expanduser(
+        os.path.join("~", ".cache", "huggingface", "hub")))
     name = str(name)
     repos = []
     if "/" in name:
@@ -542,9 +547,9 @@ def _min_speech_frames() -> int:
     """Hands-free minimum speech length before whisper, in VAD frames.
 
     A real phrase is longer than a cough or a one-word splash of noise.
-    Config is in milliseconds; the old 240ms floor is the minimum so a
-    short deliberate command still works. 0 disables the duration floor.
-    """
+    Config is in milliseconds, and there is always a 240ms floor so a
+    short deliberate command still works but a cough is not one."""
+
     ms = float(CFG.get("stt_min_speech_ms", 0) or 0)
     return max(8, int(ms / FRAME_MS))
 
@@ -590,6 +595,7 @@ class PartialStream:
         self._last_at = 0.0
         self._last_text = ""
         self._first = True
+        self._gen = 0
 
     def push(self, frame: np.ndarray) -> None:
         with self._lock:
@@ -602,6 +608,7 @@ class PartialStream:
             self._frames.clear()
             self._last_text = ""
             self._first = True
+            self._gen += 1
 
     def tick(self) -> str | None:
         """One partial transcribe, if the buffer is ripe. Returns the text
@@ -616,12 +623,18 @@ class PartialStream:
             self._last_at = now
             frames = list(self._frames)
             last = self._last_text
+            gen = self._gen
         # Transcribe outside the lock: the capture thread must never block
         # on whisper, and frames is a private snapshot so reset cannot pull
         # the buffer out from under us.
         text = self._transcribe(np.concatenate(frames))
         if text and text != last:
             with self._lock:
+                if self._gen != gen:
+                    # A reset landed while we were decoding (a dropped blip
+                    # or a non-owner): those words are not for the bus, and
+                    # they must not poison the next utterance's first tick.
+                    return None
                 self._last_text = text
             self._emit(text)
             return text
@@ -712,8 +725,17 @@ class Ears:
                         return None
                     mono = block[:, 0].copy()
                     if gate and gate():
-                        # speakers are talking and barge-in isn't on: ignore
+                        # speakers are talking and barge-in isn't on: ignore.
+                        # Reset the endpointer too, so a gate that rises
+                        # mid-utterance cannot splice pre-gate and post-gate
+                        # audio into one clip when it lifts.
                         ring.clear()
+                        frames = []
+                        in_utterance = False
+                        speech_run = speech_total = 0
+                        speech_rms_sum = 0.0
+                        if partial is not None:
+                            partial.reset()
                         continue
                     is_speech = self.vad.is_speech(mono.tobytes(), RATE)
                     if not in_utterance:

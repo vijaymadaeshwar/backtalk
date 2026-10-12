@@ -139,7 +139,7 @@ def test_stream_reset():
 
 
 def test_stream_tick_survives_a_racing_reset():
-    print("\n--- PartialStream: a tick transcribes its own snapshot ---")
+    print("\n--- PartialStream: a reset mid-decode discards the words ---")
     emitted = []
     s = PartialStream(lambda p: "words", emitted.append, interval=0.0,
                       min_frames=2)
@@ -152,8 +152,8 @@ def test_stream_tick_survives_a_racing_reset():
 
     s._transcribe = racing
     out = s.tick()
-    check("a reset during the transcribe does not break the tick",
-          out == "words" and emitted == ["words"], (out, emitted))
+    check("a reset during the transcribe drops the stale caption",
+          out is None and emitted == [], (out, emitted))
     check("the race leaves the stream empty and re-usable",
           s.tick() is None)
 
@@ -205,6 +205,30 @@ def test_listen_once_partial():
     check("a partial was published while speaking", got.wait(3.0), emitted)
     check("the final transcription is the longest, and the last call",
           len(calls) >= 2 and calls[-1] == max(calls), calls)
+
+
+def test_gate_resets_partial():
+    print("\n--- a gate that rises mid-capture resets the partial ---")
+    script = [True] * 24 + [False] * 2
+    stream = FakeStream([frame(3000) if s else frame(0) for s in script])
+    saved_mic, saved_tr = ears._open_mic, ears.transcribe
+    ears._open_mic = lambda: stream
+    ears.transcribe = lambda pcm, gate_no_speech=False: "a sentence"
+    flips = [True]
+
+    def gate():
+        first = flips[0]
+        flips[0] = False
+        return first
+
+    try:
+        e = Ears(silence_ms=60)
+        e.vad = FakeVad(script)
+        text = e.listen_once(gate=gate, on_partial=lambda t: None)
+    finally:
+        ears._open_mic, ears.transcribe = saved_mic, saved_tr
+    check("a gated frame does not derail the next utterance",
+          text == "a sentence", text)
 
 
 def test_noise_resets_partial():
@@ -343,6 +367,7 @@ test_stream_reset()
 test_stream_tick_survives_a_racing_reset()
 test_ticker()
 test_listen_once_partial()
+test_gate_resets_partial()
 test_noise_resets_partial()
 test_record_held_partial()
 test_record_clip()

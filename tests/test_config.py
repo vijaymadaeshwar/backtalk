@@ -182,6 +182,19 @@ def test_discipline_append_is_applied():
     check("the note was folded in", applied)
 
 
+def test_bad_shapes_are_safe():
+    print("\n--- a JSON array/scalar or a string extra_dirs falls back ---")
+    cfg = load_with([1, 2, 3])
+    check("a non-object config uses the defaults",
+          cfg["model"] == config.DEFAULTS["model"], cfg["model"])
+    cfg2 = load_with({"extra_dirs": "~/vault"})
+    check("a string extra_dirs is not exploded into characters",
+          cfg2["extra_dirs"] == [], cfg2["extra_dirs"])
+    cfg3 = load_with({"extra_dirs": 5})
+    check("a scalar extra_dirs is ignored",
+          cfg3["extra_dirs"] == [], cfg3["extra_dirs"])
+
+
 print("=" * 66)
 print("CONFIG")
 print("=" * 66)
@@ -195,6 +208,7 @@ test_visible_skills_warning()
 test_derived_fields()
 test_open_mic_greeting()
 test_discipline_append_is_applied()
+test_bad_shapes_are_safe()
 
 print("\n" + "=" * 66)
 print("CONFIG OK" if not FAILURES else "CONFIG FAILURES: %s" % FAILURES)

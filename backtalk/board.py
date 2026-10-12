@@ -54,11 +54,12 @@ def send(cmd: dict, timeout: float = _TIMEOUT) -> bool:
     down with it. Never raises."""
     if not _URL:
         return False
-    data = json.dumps(cmd).encode()
-    req = Request(_URL + "/cmd", data=data,
-                  headers={"Content-Type": "application/json"}, method="POST")
     try:
+        data = json.dumps(cmd).encode()
+        req = Request(_URL + "/cmd", data=data,
+                      headers={"Content-Type": "application/json"},
+                      method="POST")
         with urlopen(req, timeout=timeout) as resp:
             return 200 <= resp.status < 300
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return False

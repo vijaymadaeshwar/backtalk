@@ -239,12 +239,20 @@ def static_start():
     if not cmd:
         return
     try:
-        _static_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        with open(_LOADING_PID_FILE, "w") as f:
-            f.write(str(_static_proc.pid))
     except OSError:
         _static_proc = None
+        return
+    # The player is running now, so remember it even if the pid file cannot
+    # be written: otherwise a successful Popen whose pid-file write failed
+    # would orphan a looping player for the rest of the session.
+    _static_proc = proc
+    try:
+        with open(_LOADING_PID_FILE, "w") as f:
+            f.write(str(proc.pid))
+    except OSError:
+        pass
 
 
 def static_stop():

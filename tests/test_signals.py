@@ -218,6 +218,16 @@ with mock.patch.object(signals, "_THINKING_SOUND",
     signals.static_start()
 check("a spawn failure leaves no process behind", signals._static_proc is None)
 
+# A pid file that cannot be written must not orphan the player.
+with mock.patch.object(signals, "_THINKING_SOUND", _sound), \
+     mock.patch.object(signals, "_player_cmd", return_value=["afplay", "s"]), \
+     mock.patch.object(signals.subprocess, "Popen", return_value=fake_proc), \
+     mock.patch("builtins.open", side_effect=OSError("read only")):
+    signals.static_start()
+check("an unwritable pid file keeps the player terminable",
+      signals._static_proc is fake_proc)
+signals.static_stop()
+
 # A player that will not die must not take the bus down either.
 dead = mock.Mock()
 dead.terminate.side_effect = OSError("already gone")

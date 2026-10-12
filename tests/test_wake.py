@@ -109,12 +109,22 @@ def test_wait_for_wake_command_in_breath():
           strip_wake(woke, PHRASES) == "what's the weather")
 
 
+def test_blank_phrase_matches_nothing():
+    print("\n--- a blank wake phrase is not a wildcard ---")
+    check("a blank phrase alone does not wake", not is_wake("hello there", [""]))
+    check("blank among real phrases still matches the real one",
+          is_wake("hey seyon", ["", "hey seyon"]))
+    check("stripping a blank phrase is a no-op",
+          strip_wake("hello", [""]) == "hello")
+
+
 print("=" * 66)
 print("WAKE WORD")
 print("=" * 66)
 
 test_recognition()
 test_no_false_positives()
+test_blank_phrase_matches_nothing()
 test_default_phrases_are_english()
 test_strip_preserves_command()
 test_wait_for_wake_loop()

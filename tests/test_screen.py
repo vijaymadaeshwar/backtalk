@@ -212,6 +212,30 @@ def capture_paths():
     finally:
         screen.mss, screen.mss_tools = old_mss, old_tools
 
+    class _Bad:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def grab(self, mon):
+            raise RuntimeError("no display")
+
+    old_mss, old_tools = screen.mss, screen.mss_tools
+    screen.mss = types.SimpleNamespace(mss=lambda: _Bad())
+    screen.mss_tools = types.SimpleNamespace(to_png=lambda *a: b"")
+    try:
+        try:
+            screen.capture()
+            raised = False
+        except RuntimeError:
+            raised = True
+        check("a grab failure becomes a RuntimeError the caller can speak",
+              raised)
+    finally:
+        screen.mss, screen.mss_tools = old_mss, old_tools
+
 
 def import_failures():
     print("\n--- a machine with no mss still imports and looks safely ---")

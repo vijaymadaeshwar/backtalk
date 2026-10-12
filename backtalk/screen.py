@@ -58,9 +58,12 @@ def capture() -> bytes:
     """
     if mss is None or mss_tools is None:
         raise RuntimeError("mss is not available: %s" % (_SCREEN_ERROR,))
-    with mss.mss() as sct:
-        shot = sct.grab(sct.monitors[1])
-        return mss_tools.to_png(shot.rgb, shot.size)
+    try:
+        with mss.mss() as sct:
+            shot = sct.grab(sct.monitors[1])
+            return mss_tools.to_png(shot.rgb, shot.size)
+    except Exception as e:      # no display, no monitor, a dead session
+        raise RuntimeError("could not grab the screen: %s" % (e,)) from e
 
 
 def _run(args: list[str]) -> str:

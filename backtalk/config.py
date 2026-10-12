@@ -471,6 +471,10 @@ def load() -> dict:
         # BOM is not JSON, so the file would otherwise be reported as
         # invalid on the one character that isn't wrong.
         user = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+        if not isinstance(user, dict):
+            print("[config] backtalk.json must be a JSON object "
+                  "(a {...} of settings) — using defaults", flush=True)
+            user = {}
         for k, v in user.items():
             if isinstance(v, dict) and isinstance(cfg.get(k), dict):
                 cfg[k].update(v)
@@ -492,7 +496,11 @@ def load() -> dict:
               "implemented: skill descriptions are still visible to the "
               "session. Remove the key, it does nothing.", flush=True)
     cfg["agent_dir"] = _expand(cfg["agent_dir"])
-    cfg["extra_dirs"] = [_expand(d) for d in cfg.get("extra_dirs", [])]
+    # A string here would be iterated character by character, quietly
+    # granting ~ and / (and every letter) as accessible dirs; only a real
+    # list is honoured.
+    _dirs = cfg.get("extra_dirs")
+    cfg["extra_dirs"] = [_expand(d) for d in _dirs] if isinstance(_dirs, list) else []
     cfg["signals_dir"] = _expand(cfg.get("signals_dir", "")) or str(REPO)
     cfg["barehands_state_dir"] = _expand(cfg.get("barehands_state_dir", ""))
     # Empty stays empty: that is how journaling is switched off.

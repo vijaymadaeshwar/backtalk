@@ -156,6 +156,12 @@ def test_profile_roundtrip():
                       fh)
         check("a print of the wrong length is refused",
               vp.load_vector(wrong) is None)
+
+        arr = os.path.join(td, "array.json")
+        with open(arr, "w") as fh:
+            fh.write("[1, 2, 3]")
+        check("a non-object print is refused (not a crash)",
+              vp.load_vector(arr) is None)
         check("the wrong-length print is smaller than a real one",
               vp.feature(_voiced(1, 0.9)).size == vp.FEATURE_DIM)
 

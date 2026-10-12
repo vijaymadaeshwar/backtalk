@@ -1488,7 +1488,7 @@ async def amain():
                                          for q in QUIT_PHRASES):
                 mouth.say("Staying as we are.")
                 return True
-        if any(q in text.lower() for q in QUIT_PHRASES):
+        if _norm_speech(text) in {_norm_speech(q) for q in QUIT_PHRASES}:
             if speak_task and not speak_task.done():
                 speak_task.cancel()
             mouth.shut_up()

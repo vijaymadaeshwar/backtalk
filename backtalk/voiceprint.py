@@ -203,6 +203,8 @@ def load_vector(path: str) -> np.ndarray | None:
     try:
         with open(path) as f:
             d = json.load(f)
+        if not isinstance(d, dict):
+            return None
         if int(d.get("version", 0)) != PROFILE_VERSION:
             log(f"[voiceprint] {path} is an old print; enroll again")
             return None
