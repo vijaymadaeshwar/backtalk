@@ -7,6 +7,7 @@ The permission dataclasses are the shared vocabulary main.py's gate and
 brain.py's translation both speak, so their exact shape is pinned here.
 """
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest import mock
@@ -159,6 +160,33 @@ d4.speech_end(debounce=5.0)          # long timer, not yet fired
 d4.restore_now()
 check("restore_now cancels the timer and restores at once",
       d4._original is None and d4._timer is None and calls == [48, 80], calls)
+
+# A duck already in flight blocks a second start from ducking again.
+# The mouth worker and a PTT press both call speech_start from different
+# threads, so this concurrency is real: without the in-flight claim the
+# second caller reads the already-ducked volume and ducks twice, and the
+# restore then returns to the ducked level, leaving music too quiet.
+calls.clear()
+d5 = ducking.Ducker()
+entered = threading.Event()
+release = threading.Event()
+
+
+def _slow_probe():
+    entered.set()
+    release.wait(1.0)
+    return 80
+
+
+ducking._spotify_volume = _slow_probe
+t = threading.Thread(target=d5.speech_start)
+t.start()
+entered.wait(1.0)                    # the first duck has claimed and is probing
+d5.speech_start()                    # the second must not duck again
+release.set()
+t.join(1.0)
+check("a duck still in flight is not ducked twice",
+      calls == [48] and d5._original == 80, calls)
 
 print("\n" + "=" * 66)
 print("DUCKING OK" if not failures else "DUCKING FAILURES: %s" % failures)

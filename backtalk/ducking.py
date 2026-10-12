@@ -69,6 +69,7 @@ class Ducker:
     def __init__(self):
         self._lock = threading.Lock()
         self._original: int | None = None
+        self._ducked = False
         self._timer: threading.Timer | None = None
 
     def speech_start(self):
@@ -77,14 +78,22 @@ class Ducker:
             if self._timer:
                 self._timer.cancel()
                 self._timer = None
-            if self._original is not None:
-                return  # already ducked
+            if self._ducked:
+                return  # already ducked, or a duck is in flight
+            # Claim the duck under the lock, before releasing it to probe.
+            # Two threads can start speech at once (the mouth worker and a
+            # PTT press); without the claim both would read an un-ducked
+            # volume and duck twice, and the restore would return to the
+            # ducked level -- music left permanently quieter.
+            self._ducked = True
         # Probe and duck OUTSIDE the lock. _spotify_volume and _set_volume
         # each spawn osascript (up to a 2s timeout), and holding the lock
         # across them would stall a shutdown's restore_now -- the one call
         # that must never wait on the audio bridge.
         current = _spotify_volume()
         if current is None or current <= THRESHOLD:
+            with self._lock:
+                self._ducked = False  # nothing to duck; drop the claim
             return
         target = max(THRESHOLD, int(current * PCT))
         with self._lock:
@@ -104,10 +113,15 @@ class Ducker:
 
     def _restore(self):
         with self._lock:
-            if self._original is not None:
-                _set_volume(self._original)
-                self._original = None
+            level = self._original
+            self._original = None
+            self._ducked = False
             self._timer = None
+        # Raise the volume OUTSIDE the lock, for the same reason
+        # speech_start probes outside it: restore_now runs on the shutdown
+        # path and must not wait on the audio bridge.
+        if level is not None:
+            _set_volume(level)
 
     def restore_now(self):
         """Synchronous restore for shutdown paths — the debounce timer is
