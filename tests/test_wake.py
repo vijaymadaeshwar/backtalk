@@ -83,7 +83,7 @@ def test_wait_for_wake_loop():
     ears_mod.log = lambda msg: logged.append(msg)
     e = Ears()
     heard = ["what time is it", "no idea", "hey seyon"]
-    e.listen_once = lambda gate=None, abort=None, timeout_s=None, on_partial=None: (
+    e.listen_once = lambda gate=None, abort=None, timeout_s=None, on_partial=None, owner_check=None: (
         heard.pop(0) if heard else None)
     woke = e.wait_for_wake(PHRASES)
     check("returns the waking utterance", woke == "hey seyon")
@@ -94,14 +94,14 @@ def test_wait_for_wake_loop():
 
     print("\n--- abort stops it ---")
     e2 = Ears()
-    e2.listen_once = lambda gate=None, abort=None, timeout_s=None, on_partial=None: None
+    e2.listen_once = lambda gate=None, abort=None, timeout_s=None, on_partial=None, owner_check=None: None
     check("abort -> None", e2.wait_for_wake(PHRASES) is None)
 
 
 def test_wait_for_wake_command_in_breath():
     print("\n--- a combined breath is used as the command ---")
     e = Ears()
-    e.listen_once = lambda gate=None, abort=None, timeout_s=None, on_partial=None: (
+    e.listen_once = lambda gate=None, abort=None, timeout_s=None, on_partial=None, owner_check=None: (
         "Hey Seyon, what's the weather")
     woke = e.wait_for_wake(PHRASES)
     check("combined utterance comes back whole", woke is not None)

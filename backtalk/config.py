@@ -350,6 +350,17 @@ DEFAULTS = {
     # glass (present, add_card, explode, clear, ...). Default matches
     # barehands' port; set "" to turn a box with no board fully quiet.
     "board_url": "http://127.0.0.1:8794",
+    # OWNER-ONLY WAKE: a small voiceprint learned on this machine, so the
+    # room's voices cannot wake the agent. speaker_id turns the gate on;
+    # it does nothing until a print is enrolled by running the line with
+    # --enroll. speaker_profile is where the print is kept ("" = a file
+    # under ~/.backtalk). speaker_threshold is the cosine floor a clip
+    # must clear to count as you: raise it to be stricter, lower it if the
+    # gate turns you away. Classic DSP, not a security boundary.
+    "speaker_id": False,
+    "speaker_profile": "",
+    "speaker_threshold": 0.75,
+    "speaker_enroll_seconds": 3.0,
     # Sound played while the agent thinks, so a long pause never reads as
     # a dead line. The bundled one ships in assets/; a relative path
     # resolves against this repo. Set "" to think in silence.

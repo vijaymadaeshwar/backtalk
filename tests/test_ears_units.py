@@ -496,7 +496,7 @@ def wake_loop():
     calls = {"n": 0}
 
     def listen_once(self, gate=None, abort=None, timeout_s=None,
-                    on_partial=None):
+                    on_partial=None, owner_check=None):
         i = calls["n"]
         calls["n"] += 1
         return seq[i] if i < len(seq) else None
@@ -507,7 +507,7 @@ def wake_loop():
           got == "hey seyon", got)
 
     def listen_none(self, gate=None, abort=None, timeout_s=None,
-                    on_partial=None):
+                    on_partial=None, owner_check=None):
         return None
 
     with mock.patch.object(ears.Ears, "listen_once", new=listen_none):

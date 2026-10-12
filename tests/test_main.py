@@ -17,6 +17,9 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backtalk import main as btmain  # noqa: E402
+from backtalk import voiceprint as vp  # noqa: E402
+
+import numpy as np  # noqa: E402
 
 FAILURES = []
 
@@ -871,13 +874,43 @@ class _WakeEars(_LoopEars):
         self._then = then
         self._n = 0
 
-    def wait_for_wake(self, phrases, gate=None, abort=None, on_partial=None):
+    def wait_for_wake(self, phrases, gate=None, abort=None, on_partial=None,
+                      owner_check=None):
         self._n += 1
         return self._wake if self._n == 1 else None
 
     def listen_once(self, gate=None, abort=None, on_partial=None):
         self.calls += 1
         return self._then if self._n == 1 else None
+
+
+class _EnrollEars(_LoopEars):
+    """Returns a synthetic clip from record_clip for --enroll."""
+
+    def __init__(self, clip=None):
+        super().__init__()
+        self._clip = clip
+
+    def record_clip(self, seconds=3.0):
+        if self._clip is not None:
+            return self._clip
+        rng = np.random.default_rng(0)
+        return (rng.standard_normal(16000) * 3000).astype(np.int16)
+
+
+class _GateEars(_WakeEars):
+    """A wake listener that records the owner check it was handed."""
+
+    def __init__(self, wake):
+        super().__init__(wake)
+        self.owner_checks = []
+
+    def wait_for_wake(self, phrases, gate=None, abort=None, on_partial=None,
+                      owner_check=None):
+        self.owner_checks.append(owner_check)
+        return super().wait_for_wake(phrases, gate=gate, abort=abort,
+                                     on_partial=on_partial,
+                                     owner_check=owner_check)
 
 
 class _QuitEars(_LoopEars):
@@ -1031,11 +1064,13 @@ class _FollowEars(_LoopEars):
         self.text = text
         self.direct = 0
 
-    def wait_for_wake(self, phrases, gate=None, abort=None, on_partial=None):
+    def wait_for_wake(self, phrases, gate=None, abort=None, on_partial=None,
+                      owner_check=None):
         time.sleep(0.05)
         return None
 
-    def listen_once(self, gate=None, abort=None, on_partial=None):
+    def listen_once(self, gate=None, abort=None, on_partial=None,
+                    owner_check=None):
         self.calls += 1
         self.direct += 1
         time.sleep(0.05)
@@ -1841,6 +1876,57 @@ def check_in_followup():
           any("Answer one." in c for c in mouth.chunks), mouth.chunks)
 
 
+def voice_enrollment():
+    print("\n--- amain: --enroll learns a voice, and the gate reads it ---")
+    with tempfile.TemporaryDirectory() as td:
+        prof = os.path.join(td, "vp.json")
+        mouth, _, res = _run_amain([], argv=["--enroll"],
+                                   ears=_EnrollEars(),
+                                   cfg_extra={"speaker_profile": prof})
+        check("the enroll run exits cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        check("a voiceprint was written", os.path.exists(prof))
+        check("enrollment is spoken back",
+              any("Enrolled" in s for s in mouth.said), mouth.said)
+
+    with tempfile.TemporaryDirectory() as td:
+        prof = os.path.join(td, "vp.json")
+        mouth, _, res = _run_amain(
+            [], argv=["--enroll"], ears=_EnrollEars(clip=np.zeros(100, np.int16)),
+            cfg_extra={"speaker_profile": prof})
+        check("a failed enroll still exits cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        check("no print is written when the clips are unusable",
+              not os.path.exists(prof))
+        check("the line admits it did not catch enough",
+              any("enough of your voice" in s for s in mouth.said), mouth.said)
+
+    with tempfile.TemporaryDirectory() as td:
+        prof = os.path.join(td, "vp.json")
+        clip = (np.random.default_rng(1).standard_normal(16000)
+                * 3000).astype(np.int16)
+        vp.save_profile(prof, vp.feature(clip))
+        ears_fake = _GateEars("vijay seyon")
+        _, _, res = _run_amain(
+            ["goodbye seyon"],
+            cfg_extra={"mic_mode": "open", "wake_word": True,
+                       "wake_word_phrases": ["vijay seyon"],
+                       "speaker_id": True, "speaker_profile": prof},
+            ears=ears_fake, feed_delay=0.02)
+        check("the gated run hangs up cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        check("the owner check reached the wake gate",
+              any(c is not None for c in ears_fake.owner_checks),
+              ears_fake.owner_checks)
+
+    _, _, res = _run_amain(
+        ["goodbye seyon"],
+        cfg_extra={"speaker_id": True, "speaker_profile":
+                   os.path.join(tempfile.gettempdir(), "no-such-vp.json")})
+    check("speaker_id with no print runs ungated and clean",
+          res["exit"] is None and not res["timeout"], res)
+
+
 def check_in():
     print("\n--- amain: the assistant can speak first ---")
     mouth, _, res = _run_amain(
@@ -2106,6 +2192,7 @@ board_control_text()
 board_control()
 recall_text()
 recall()
+voice_enrollment()
 partial_caption()
 check_in()
 check_in_prompt_activity()

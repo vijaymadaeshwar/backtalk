@@ -230,6 +230,89 @@ def test_record_held_partial():
     check("the hold published a partial", got.wait(3.0), held)
 
 
+def test_record_clip():
+    print("\n--- record_clip: a fixed run of frames ---")
+    stream = FakeStream([frame(3000)])
+    saved = ears._open_mic
+    ears._open_mic = lambda: stream
+    try:
+        got = ears.Ears().record_clip(0.06)
+    finally:
+        ears._open_mic = saved
+    check("record_clip returns int16 audio", got.dtype == np.int16, got.dtype)
+    check("record_clip returns the requested length",
+          got.shape == (int(0.06 * ears.RATE / ears.FRAME_LEN) * ears.FRAME_LEN,),
+          got.shape)
+
+
+def test_owner_gate():
+    print("\n--- owner_check gates the utterance ---")
+    # Two spoken turns. The owner check rejects the first, accepts the
+    # second: the rejected clip must never reach whisper and the second
+    # must come back as the transcript.
+    script = ([True] * 20 + [False] * 2 + [True] * 20 + [False] * 2)
+    stream = FakeStream([frame(3000) if s else frame(0) for s in script],
+                        delay=0.0)
+    saved_mic, saved_tr = ears._open_mic, ears.transcribe
+    calls = []
+    ears._open_mic = lambda: stream
+    ears.transcribe = lambda pcm, gate_no_speech=False: (
+        calls.append(len(pcm)) or "the owner's words")
+    seen = []
+
+    def owner(pcm):
+        seen.append(len(pcm))
+        return len(seen) == 2
+
+    try:
+        e = ears.Ears(silence_ms=60)
+        e.vad = FakeVad(script)
+        text = e.listen_once(owner_check=owner)
+    finally:
+        ears._open_mic, ears.transcribe = saved_mic, saved_tr
+    check("the rejected clip is dropped, the owned one transcribed",
+          text == "the owner's words", text)
+    check("the owner check ran per utterance", len(seen) == 2, seen)
+    check("only the owned clip reached whisper", len(calls) == 1, calls)
+
+
+def test_owner_gate_accepts():
+    print("\n--- owner_check that accepts lets the turn through ---")
+    script = [True] * 20 + [False] * 2
+    stream = FakeStream([frame(3000) if s else frame(0) for s in script],
+                        delay=0.0)
+    saved_mic, saved_tr = ears._open_mic, ears.transcribe
+    ears._open_mic = lambda: stream
+    ears.transcribe = lambda pcm, gate_no_speech=False: "my words"
+    try:
+        e = ears.Ears(silence_ms=60)
+        e.vad = FakeVad(script)
+        text = e.listen_once(owner_check=lambda pcm: True)
+    finally:
+        ears._open_mic, ears.transcribe = saved_mic, saved_tr
+    check("an accepted utterance is transcribed", text == "my words", text)
+
+
+def test_owner_gate_via_wake():
+    print("\n--- wait_for_wake forwards the owner check ---")
+    seen = []
+
+    def listen_once(self, gate=None, abort=None, timeout_s=None,
+                    on_partial=None, owner_check=None):
+        seen.append(owner_check)
+        return "hey seyon"
+
+    saved = ears.Ears.listen_once
+    ears.Ears.listen_once = listen_once
+    try:
+        got = ears.Ears().wait_for_wake(["hey seyon"],
+                                        owner_check=lambda p: True)
+    finally:
+        ears.Ears.listen_once = saved
+    check("the wake matched", got == "hey seyon", got)
+    check("the owner check was handed down", seen and seen[0] is not None)
+
+
 print("=" * 66)
 print("PARTIAL STT STREAMING")
 print("=" * 66)
@@ -241,6 +324,10 @@ test_ticker()
 test_listen_once_partial()
 test_noise_resets_partial()
 test_record_held_partial()
+test_record_clip()
+test_owner_gate()
+test_owner_gate_accepts()
+test_owner_gate_via_wake()
 
 print("\n" + "=" * 66)
 print("PARTIAL OK" if not FAILURES else "PARTIAL FAILURES: %s" % FAILURES)

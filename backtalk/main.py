@@ -72,7 +72,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from backtalk import board, recall, screen, signals
+from backtalk import board, recall, screen, signals, voiceprint
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
@@ -154,6 +154,36 @@ def _norm_speech(text):
     for ch in text.lower():
         out.append(ch if "a" <= ch <= "z" or "0" <= ch <= "9" else " ")
     return " ".join("".join(out).split())
+
+
+async def _run_enroll(ears, mouth):
+    """Learn the owner's voice from a few short phrases. Returns True if
+    the print was saved, False otherwise. The caller has already arranged
+    for the line to exit after this returns."""
+    loop = asyncio.get_event_loop()
+    path = CFG.get("speaker_profile") or voiceprint.default_profile()
+    seconds = float(CFG.get("speaker_enroll_seconds", 3.0))
+    mouth.say("I'll learn your voice from a few short phrases. Speak normally.")
+    mouth.wait_done(timeout=30)
+    vectors = []
+    for prompt in voiceprint.ENROLL_PROMPTS:
+        mouth.say(prompt)
+        mouth.wait_done(timeout=30)
+        pcm = await loop.run_in_executor(_BLOCKERS, ears.record_clip,
+                                         seconds)
+        f = voiceprint.feature(pcm) if pcm is not None else None
+        if f is not None:
+            vectors.append(f)
+    vec = voiceprint.combine(vectors)
+    if vec is None:
+        mouth.say("I did not catch enough of your voice. "
+                  "Let's try again when it's quieter.")
+        mouth.wait_done(timeout=30)
+        return False
+    voiceprint.save_profile(path, vec)
+    mouth.say("Enrolled. I will answer only to you now.")
+    mouth.wait_done(timeout=30)
+    return True
 
 
 def _deny_pending(reason=_INTERRUPT_ANSWER):
@@ -1115,13 +1145,22 @@ async def amain():
 
     mouth = Mouth()
     ears = Ears()
-    brain = WarmBrain(model=model,
-                      can_use_tool=make_permission_gate(mouth),
-                      resume_id=resume_id)
-    # Journaling is inert unless journal_dir is set, so this costs nothing
-    # for anyone who has not opted in.
-    journal = Journal(CFG.get("journal_dir") or None, agent_name=NAME)
+    # OWNER GATE: a small voiceprint to stop the room waking the agent.
+    speaker = voiceprint.load_speaker(CFG)
+    owner_check = (speaker.check
+                   if speaker is not None and CFG.get("speaker_id") else None)
+    if CFG.get("speaker_id") and speaker is None:
+        log("[backtalk] speaker_id is on but no voiceprint is enrolled; "
+            "run with --enroll first. Not gating.")
 
+    if "--enroll" in sys.argv:
+        # Records a few short phrases to learn your voice, then exits.
+        await _run_enroll(ears, mouth)
+        return
+    brain = WarmBrain(model=model,
+                       can_use_tool=make_permission_gate(mouth),
+                       resume_id=resume_id)
+    journal = Journal(CFG.get("journal_dir") or None, agent_name=NAME)
     mode = ("hands-free listening (the talk key still works)"
             if _MIC["mode"] == "open"
             else f"push-to-talk ({CFG['ptt_key']})")
@@ -1628,7 +1667,8 @@ async def amain():
                 return (g, ears.listen_once(gate=mic_gate, abort=ab,
                                             on_partial=emit_partial))
             woke = ears.wait_for_wake(wake_phrases, gate=mic_gate, abort=ab,
-                                      on_partial=emit_partial)
+                                      on_partial=emit_partial,
+                                      owner_check=owner_check)
             if woke is None:
                 return (g, None)
             cmd = strip_wake(woke, wake_phrases)

@@ -657,7 +657,8 @@ class Ears:
         self.silence_frames = silence_ms // FRAME_MS
 
     def listen_once(self, gate=None, timeout_s: float | None = None,
-                    abort=None, on_partial=None) -> str | None:
+                    abort=None, on_partial=None,
+                    owner_check=None) -> str | None:
         """Block until one utterance completes; return transcript
         (or None on timeout). An `abort` callable is checked every
         frame; returning True closes the mic and returns None, which
@@ -667,7 +668,12 @@ class Ears:
         on_partial, when given, receives growing partial transcripts of the
         utterance while it is still being spoken (see PartialStream), so a
         face can caption the words live. It is stopped before the final
-        transcription so the model decodes one clip at a time."""
+        transcription so the model decodes one clip at a time.
+
+        owner_check, when given, is handed the finished utterance's audio
+        and must return True for the owner. A False drops the utterance as
+        if it were a noise blip and listening continues; a None means the
+        gate is off and every voice is taken."""
         frames: list[np.ndarray] = []
         ring: list[np.ndarray] = []   # pre-roll so the first syllable survives
         speech_run = 0
@@ -724,15 +730,28 @@ class Ears:
                             mean_rms = speech_rms_sum / speech_total \
                                 if speech_total else 0.0
                             min_frames = _min_speech_frames()
+                            reject = None
                             if speech_total < min_frames or \
                                not speech_is_audible(mean_rms):
                                 # Too short to be a phrase, or too quiet to be
                                 # a person: a noise blip, not a sentence. Keep
                                 # listening rather than hand it to whisper,
                                 # which would invent words over the hum.
-                                if speech_total >= min_frames:
+                                reject = "noise"
+                            elif owner_check is not None and \
+                                    not owner_check(np.concatenate(frames)):
+                                # Someone else in the room. The words are not
+                                # for this line: drop the utterance and keep
+                                # listening, exactly like a noise blip.
+                                reject = "other"
+                            if reject is not None:
+                                if reject == "noise" and \
+                                   speech_total >= min_frames:
                                     log(f"[ears] dropped a {mean_rms:.0f}-rms "
                                         f"blip as room noise")
+                                elif reject == "other":
+                                    log("[ears] that was not the owner -- "
+                                        "ignoring")
                                 in_utterance = False
                                 frames, ring = [], []
                                 speech_run = speech_total = 0
@@ -749,7 +768,7 @@ class Ears:
                 ticker.stop()
 
     def wait_for_wake(self, phrases, gate=None, abort=None,
-                      on_partial=None) -> str | None:
+                      on_partial=None, owner_check=None) -> str | None:
         """Block until an utterance contains a wake phrase; return it.
 
         Reuses the same VAD endpointer as listen_once, so a wake-word
@@ -757,10 +776,15 @@ class Ears:
         `abort` fires; otherwise it keeps the mic open indefinitely,
         which is the point of hands-free. The returned transcript may
         carry the command in the same breath ("hey seyon, what's it
-        doing"), and the caller strips the phrase with strip_wake()."""
+        doing"), and the caller strips the phrase with strip_wake().
+
+        owner_check gates the wake on the speaker: an utterance that is
+        not the enrolled owner is dropped and listening continues, so
+        the room's voices cannot wake the line."""
         while True:
             text = self.listen_once(gate=gate, abort=abort,
-                                    on_partial=on_partial)
+                                    on_partial=on_partial,
+                                    owner_check=owner_check)
             if text is None:
                 return None
             if is_wake(text, phrases):
@@ -772,6 +796,20 @@ class Ears:
             # teach the phrase variants with real data instead of guesses.
             log(f"[ears] heard {text!r} - no wake phrase match "
                 f"(nsp={_LAST_NO_SPEECH:.2f})")
+
+    def record_clip(self, seconds: float = 3.0) -> np.ndarray:
+        """Record a fixed-length clip from the mic, for voice enrollment.
+
+        No VAD on purpose: enrollment wants exactly this many seconds of
+        the speaker, silence and all, so the print sees the real voice
+        rather than whichever fragments a gate chose to keep."""
+        frames: list[np.ndarray] = []
+        n = max(1, int(seconds * RATE / FRAME_LEN))
+        with _open_mic() as stream:
+            for _ in range(n):
+                block, _ = stream.read(FRAME_LEN)
+                frames.append(block[:, 0].copy())
+        return np.concatenate(frames)
 
 
 def record_held(is_held, max_s: float = 60.0, min_s: float = 0.25,
