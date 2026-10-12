@@ -337,6 +337,11 @@ DEFAULTS = {
     # breathes while idle, spins while thinking, pulses with the voice.
     # (github.com/jaredrhod/barehands)
     "barehands_state_dir": "",
+    # THE BAREHANDS HANDS: the board's own HTTP server, so spoken phrases
+    # like "put the plan on the board" and "clear the board" reach the
+    # glass (present, add_card, explode, clear, ...). Default matches
+    # barehands' port; set "" to turn a box with no board fully quiet.
+    "board_url": "http://127.0.0.1:8794",
     # Sound played while the agent thinks, so a long pause never reads as
     # a dead line. The bundled one ships in assets/; a relative path
     # resolves against this repo. Set "" to think in silence.

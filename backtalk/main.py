@@ -72,7 +72,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from backtalk import screen, signals
+from backtalk import board, screen, signals
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
@@ -946,6 +946,72 @@ def _reminder_line(label):
     return f"Reminder: {label}." if label else "Your timer is up."
 
 
+# The board's spoken surface. A phrase reaches the glass only when it names
+# the board ("... on the board") or opens with "present" -- "show me how to
+# X" is a question for the model, only "show X on the board" is a command.
+# The bare verbs below are actions the board takes on its own contents.
+_BOARD_VERB_ACTS = {"clear": "clear", "sweep": "clear", "wipe": "clear",
+                    "clean": "clear", "reset": "reset", "explode": "explode",
+                    "assemble": "assemble"}
+_BOARD_TAIL_WORDS = frozenset(("the", "board", "glass", "screen", "it",
+                               "that", "now", "please"))
+_BOARD_TAILS = (" on the board", " on the glass", " on the screen",
+                " on the air board")
+_BOARD_SHOW = ("put ", "show ", "present ", "throw ", "bring up ",
+               "pull up ", "stick ")
+# Talk ABOUT the board ("what is on the board") names the board too, so the
+# head is checked against the words that open a question and left to the
+# brain instead of being read as a present.
+_BOARD_ASK = frozenset(("what", "what's", "which", "who", "whose", "is",
+                        "are", "was", "were", "do", "does", "did", "can",
+                        "could", "how", "why", "when", "where", "anything",
+                        "everything", "nothing"))
+
+
+def board_command(text):
+    """Read a spoken board command. Returns a barehands /cmd dict or None.
+
+    Kept pure so the wording is easy to test, the same as the other spoken
+    commands. Only phrases that name the board (or open with "present") are
+    claimed here, so ordinary conversation still reaches the brain."""
+    low = text.lower().strip()
+    words = low.split()
+    if words and words[0] in _BOARD_VERB_ACTS \
+            and all(w in _BOARD_TAIL_WORDS for w in words[1:]):
+        return {"a": _BOARD_VERB_ACTS[words[0]]}
+    tail = next((t for t in _BOARD_TAILS if low.endswith(t)), None)
+    if tail:
+        head = low[:-len(tail)].strip()
+    elif low.startswith("present "):
+        head = low[len("present "):].strip()
+    else:
+        return None
+    head = head.strip(" .,!?")
+    if not head or head.split()[0] in _BOARD_ASK:
+        return None
+    for verb in _BOARD_SHOW:
+        if head.startswith(verb):
+            rest = head[len(verb):].strip()
+            if rest.startswith("me "):
+                rest = rest[3:].strip()
+            rest = rest or head
+            return {"a": "present", "title": rest}
+    return {"a": "present", "title": head}
+
+
+def _board_ack(cmd, ok):
+    """The spoken answer to a board command. Pure, so the wording is easy to
+    test."""
+    if not ok:
+        return "I couldn't reach the board."
+    return {
+        "clear": "Board's clear.",
+        "reset": "Board reset.",
+        "explode": "Blown apart.",
+        "assemble": "Back together.",
+    }.get(cmd.get("a"), "It's up on the board.")
+
+
 async def journal_flush(journal: Journal, brain: WarmBrain):
     """Write the session down, then get out of the way.
 
@@ -1417,6 +1483,19 @@ async def amain():
                 mouth.say("Check-ins are back on. I'll look in again "
                           "when it's been quiet.")
             log(f"[check-in] spoken {kind}")
+            signals.set_state("idle")
+            return True
+        # A spoken board command ("put the plan on the board", "clear the
+        # board") is sent straight to the barehands server and answered
+        # here. It never reaches the brain: it is an instruction to the
+        # glass, not a question. Only claimed when a board is configured,
+        # so a box with no board treats these as ordinary talk.
+        bc = board_command(text) if board.enabled() else None
+        if bc is not None:
+            ok = board.send(bc)
+            log(f"[board] {bc.get('a')} -> "
+                f"{'ok' if ok else 'unreachable'}")
+            mouth.say(_board_ack(bc, ok))
             signals.set_state("idle")
             return True
         verb = verb or console_match(text)

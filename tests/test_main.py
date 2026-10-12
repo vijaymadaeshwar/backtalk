@@ -1634,6 +1634,74 @@ def stop_words():
           "Okay." not in mouth2.said, mouth2.said)
 
 
+def board_control_text():
+    print("\n--- board_command: the spoken board ---")
+    b = btmain.board_command
+    check("clear the board is a clear", b("clear the board") == {"a": "clear"})
+    check("sweep it is a clear", b("sweep it") == {"a": "clear"})
+    check("wipe that now is a clear", b("wipe that now") == {"a": "clear"})
+    check("reset the board is a reset",
+          b("reset the board") == {"a": "reset"})
+    check("explode it is an explode", b("explode it") == {"a": "explode"})
+    check("assemble is an assemble", b("assemble") == {"a": "assemble"})
+    check("put X on the board presents it",
+          b("put the plan on the board") == {"a": "present",
+                                             "title": "the plan"})
+    check("show me X on the board drops the me",
+          b("show me the numbers on the board")
+          == {"a": "present", "title": "the numbers"})
+    check("present X is a present",
+          b("present the roadmap") == {"a": "present", "title": "the roadmap"})
+    check("on the glass lands too",
+          b("throw the budget on the glass")
+          == {"a": "present", "title": "the budget"})
+    check("a bare title after the tail is a present",
+          b("the roadmap on the board")
+          == {"a": "present", "title": "the roadmap"})
+    check("ordinary speech is not a board command",
+          b("what is on the board") is None)
+    check("a question about a screen is not a command",
+          b("show me how to fix the screen") is None)
+    check("an empty present is nothing", b("present") is None)
+    check("an unrelated sentence is not a board command",
+          b("let's go for a walk") is None)
+
+
+def board_control():
+    print("\n--- amain: a spoken board command reaches the glass ---")
+    sent = []
+    with mock.patch.object(btmain.board, "_URL", "http://127.0.0.1:8794"), \
+         mock.patch.object(btmain.board, "send",
+                           side_effect=lambda c: sent.append(c) or True):
+        mouth, _, res = _run_amain(
+            ["clear the board", "put the plan on the board", "goodbye seyon"])
+    check("the board run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    check("both commands were sent",
+          sent == [{"a": "clear"}, {"a": "present", "title": "the plan"}],
+          sent)
+    check("the clear is acknowledged", "Board's clear." in mouth.said,
+          mouth.said)
+    check("the present is acknowledged",
+          "It's up on the board." in mouth.said, mouth.said)
+
+    with mock.patch.object(btmain.board, "_URL", "http://127.0.0.1:8794"), \
+         mock.patch.object(btmain.board, "send", return_value=False):
+        mouth2, _, res2 = _run_amain(["explode it", "goodbye seyon"])
+    check("an unreachable board still hangs up cleanly",
+          res2["exit"] is None and not res2["timeout"], res2)
+    check("an unreachable board is admitted",
+          "I couldn't reach the board." in mouth2.said, mouth2.said)
+
+    with mock.patch.object(btmain.board, "_URL", ""):
+        mouth3, _, res3 = _run_amain(["clear the board", "goodbye seyon"])
+    check("with no board, a board phrase still hangs up cleanly",
+          res3["exit"] is None and not res3["timeout"], res3)
+    brain3 = _LoopBrain.instances[-1]
+    check("with no board, a board phrase is ordinary talk",
+          "clear the board" in brain3.got, brain3.got)
+
+
 def check_in_quiet_and_pause():
     print("\n--- amain: quiet hours and a spoken pause hold check-ins ---")
     # A spoken "stay quiet" must stop a check-in that would otherwise fire.
@@ -1968,6 +2036,8 @@ checkin_quiet_helpers()
 reminder_and_stop_helpers()
 reminders()
 stop_words()
+board_control_text()
+board_control()
 check_in()
 check_in_prompt_activity()
 check_in_defer()
