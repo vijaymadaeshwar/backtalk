@@ -2141,6 +2141,212 @@ def tty_reader_branches():
           got == ["hi body"], got)
 
 
+def remember_and_focus():
+    print("\n--- remember/focus: the pure wording ---")
+    r = btmain.remember_request
+    check("a remember-that is kept whole",
+          r("remember that the wifi password is hunter2")
+          == "the wifi password is hunter2")
+    check("a make-a-note drops the opener",
+          r("make a note of the spare key code") == "the spare key code")
+    check("write this down keeps the case and words",
+          r("write this down: Call Sara at 4") == "Call Sara at 4")
+    check("a bare remember is not a save",
+          r("remember the time we went to Rome") is None)
+    check("an empty remember body is nothing",
+          r("remember that ...") is None)
+    check("ordinary talk is not a save",
+          r("how are you today") is None)
+
+    with tempfile.TemporaryDirectory() as td:
+        path = btmain.remember_note(td, "the door code is 4321")
+        with open(path, encoding="utf-8") as f:
+            body = f.read()
+        check("a kept line lands in a dated note",
+              "the door code is 4321" in body and path.endswith(".md"), body)
+        btmain.remember_note(td, "and the gate is 9")
+        with open(path, encoding="utf-8") as f:
+            body2 = f.read()
+        check("a second keep appends, it does not replace",
+              body2.count("- ") == 2, body2)
+
+    f = btmain.focus_request
+    check("focus for twenty minutes is twenty",
+          f("focus for twenty minutes", 25) == 20)
+    check("focus with no length is the default",
+          f("focus mode", 25) == 25)
+    check("a pomodoro uses the default",
+          f("start a pomodoro", 50) == 50)
+    check("do not disturb for half an hour is thirty",
+          f("do not disturb for half an hour", 25) == 30)
+    check("a zero default still lands at least a minute",
+          f("focus mode", 0) == 25)
+    check("focus the window is not a focus stretch",
+          f("focus the window", 25) is None)
+    check("ordinary talk is not a focus",
+          f("let us take a walk", 25) is None)
+
+    print("\n--- amain: remember and focus are handled in-line ---")
+    with tempfile.TemporaryDirectory() as td:
+        mouth, _, res = _run_amain(
+            ["remember that the router is in the hall", "goodbye seyon"],
+            cfg_extra={"remember_dir": td})
+        check("the remember run hangs up cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        brain = _LoopBrain.instances[-1]
+        check("a kept line never reaches the brain",
+              "remember that the router is in the hall" not in brain.got,
+              brain.got)
+        check("the keep is acknowledged aloud",
+              any("written that down" in s for s in mouth.said), mouth.said)
+        wrote = [p for p in os.listdir(td) if p.startswith("Remembered")]
+        check("the keep landed on disk", len(wrote) == 1, wrote)
+
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, "blocker"), "w", encoding="utf-8") as f:
+            f.write("x")
+        mouth, _, res = _run_amain(
+            ["remember that the router is in the hall", "goodbye seyon"],
+            cfg_extra={"remember_dir": os.path.join(td, "blocker", "sub")})
+        check("an unwritable notes folder still hangs up cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        check("an unwritable notes folder is admitted",
+              any("couldn't write that down" in s for s in mouth.said),
+              mouth.said)
+
+    mouth, _, res = _run_amain(["focus for five minutes", "goodbye seyon"])
+    check("the focus run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("a focus stretch never reaches the brain",
+          "focus for five minutes" not in brain.got, brain.got)
+    check("the focus stretch is spoken",
+          any("focusing for 5 minutes" in s for s in mouth.said), mouth.said)
+
+    mouth2, _, res2 = _run_amain(["focus mode", "goodbye seyon"])
+    check("a default-length focus uses the configured minutes",
+          any("focusing for 25 minutes" in s for s in mouth2.said),
+          mouth2.said)
+
+
+def briefing_cases():
+    print("\n--- briefing: the pure bits ---")
+    b = btmain.briefing_request
+    check("brief me is a briefing", b("brief me") is True)
+    check("a brief-me tail is a briefing",
+          b("brief me on my day") is True)
+    check("what is on my plate is a briefing",
+          b("what's on my plate today") is True)
+    check("ordinary talk is not a briefing",
+          b("what time is it") is False)
+
+    check("a new day is due", btmain.briefing_due("2026-10-12", "2026-10-13")
+          is True)
+    check("the same day is not due",
+          btmain.briefing_due("2026-10-13", "2026-10-13") is False)
+    check("no marker is due",
+          btmain.briefing_due("", "2026-10-13") is True)
+
+    with tempfile.TemporaryDirectory() as td:
+        path, today = btmain.briefing_state_path(td)
+        check("the marker is named for the day and sits in the folder",
+              path.startswith(td) and path.endswith(".briefing_day"), path)
+        check("a missing marker reads as empty",
+              btmain.read_briefing_day(path) == "")
+        btmain.write_briefing_day(path, today)
+        check("a written marker reads back", btmain.read_briefing_day(path)
+              == today)
+        with open(os.path.join(td, "blocker"), "w", encoding="utf-8") as f:
+            f.write("x")
+        btmain.write_briefing_day(os.path.join(td, "blocker", "x"), today)
+        check("an unwritable marker stays quiet",
+              btmain.read_briefing_day(
+                  os.path.join(td, "blocker", "x")) == "")
+
+    print("\n--- amain: the spoken and the automatic briefing ---")
+    mouth, _, res = _run_amain(["brief me", "goodbye seyon"])
+    check("the briefing run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("the briefing is framed for the brain",
+          btmain._BRIEFING_PROMPT in brain.got, brain.got)
+    check("the raw phrase is not sent verbatim",
+          "brief me" not in brain.got, brain.got)
+
+    with tempfile.TemporaryDirectory() as td:
+        _, _, res2 = _run_amain(
+            ["goodbye seyon"],
+            cfg_extra={"daily_briefing": True, "signals_dir": td})
+        check("the automatic briefing run hangs up cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        brain = _LoopBrain.instances[-1]
+        check("the first launch of the day briefs",
+              btmain._BRIEFING_PROMPT in brain.got, brain.got)
+        _, _, res3 = _run_amain(
+            ["goodbye seyon"],
+            cfg_extra={"daily_briefing": True, "signals_dir": td})
+        brain3 = _LoopBrain.instances[-1]
+        check("a second launch the same day does not",
+              btmain._BRIEFING_PROMPT not in brain3.got, brain3.got)
+
+
+def care_cases():
+    print("\n--- care: the pure decision ---")
+    c = btmain.care
+    check("a low battery off the charger is a nudge",
+          "battery is at 12 percent" in c.battery_nudge(12, False),
+          c.battery_nudge(12, False))
+    check("a charging battery is not a nudge",
+          c.battery_nudge(12, True) is None)
+    check("an unknown battery is not a nudge",
+          c.battery_nudge(None, False) is None)
+    check("a topped-up battery is not a nudge",
+          c.battery_nudge(80, False) is None)
+    check("a nearly-full disk is a nudge",
+          "nearly full" in c.disk_nudge(2.0), c.disk_nudge(2.0))
+    check("a roomy disk is not a nudge", c.disk_nudge(200.0) is None)
+    check("an unknown disk is not a nudge", c.disk_nudge(None) is None)
+    check("a long session is a nudge",
+          "about 2 hours" in c.session_nudge(150.0), c.session_nudge(150.0))
+    check("a short session is not a nudge", c.session_nudge(10.0) is None)
+    check("an unknown session is not a nudge", c.session_nudge(None) is None)
+    check("the first worthy fact wins",
+          c.pick(c.facts(pct=10, on_ac=False)) == c.battery_nudge(10, False))
+    check("no worthy fact is nothing",
+          c.pick(c.facts(pct=90, on_ac=True, free_gb=500, minutes=5)) is None)
+    check("enough quiet is due", c.due(1000.0, 0.0, 500.0) is True)
+    check("too soon is not due", c.due(1000.0, 900.0, 500.0) is False)
+
+    print("\n--- amain: a due care nudge colours the check-in ---")
+    with mock.patch.object(btmain.care, "current_nudge",
+                           return_value=("the battery is at 12 percent and "
+                                         "the charger is not plugged in",
+                                         999.0)):
+        _, _, res = _run_amain(
+            ["goodbye seyon"],
+            cfg_extra={"check_in_enabled": True, "check_in_interval": 0.02,
+                       "care_enabled": True},
+            ears=_QuietEars(), feed_delay=0.35)
+    check("the care check-in run hangs up cleanly",
+          res["exit"] is None and not res["timeout"], res)
+    brain = _LoopBrain.instances[-1]
+    check("a due care nudge is folded into the check-in",
+          any("battery is at 12 percent" in got for got in brain.got),
+          brain.got)
+
+    with mock.patch.object(btmain.care, "current_nudge",
+                           return_value=(None, 0.0)):
+        _, _, res2 = _run_amain(
+            ["goodbye seyon"],
+            cfg_extra={"check_in_enabled": True, "check_in_interval": 0.02,
+                       "care_enabled": True},
+            ears=_QuietEars(), feed_delay=0.35)
+    brain2 = _LoopBrain.instances[-1]
+    check("no care fact leaves the check-in plain",
+          not any("you might also mention" in got for got in brain2.got),
+          brain2.got)
+
+
 def main_entry():
     print("\n--- main(): the process boundary ---")
 
@@ -2241,6 +2447,9 @@ board_control_text()
 board_control()
 recall_text()
 recall()
+remember_and_focus()
+briefing_cases()
+care_cases()
 voice_enrollment()
 voice_whoami()
 partial_caption()

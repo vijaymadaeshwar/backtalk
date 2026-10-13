@@ -143,6 +143,27 @@ DEFAULTS = {
     # normal back-and-forth instead of "Hey Seyon ..." every time. 0 turns
     # it off and the wake word is required for every utterance, as before.
     "followup_window": 0.0,
+    # A folder where a spoken "remember this ..." drops one kept line, one
+    # dated markdown file per day. Empty (the default) turns the spoken
+    # command off. Point it at a notes folder -- your vault's inbox is the
+    # obvious one -- and "remember that the wifi password is ..." is
+    # captured in a breath, without a round trip to the model.
+    "remember_dir": "",
+    # Length of a spoken focus stretch ("focus for twenty minutes", "start a
+    # pomodoro", "do not disturb for an hour") when no length is named, in
+    # minutes. During it the line stays quiet, then says one line when it is
+    # time to take a break. Reuses the check-in pause and the reminders, so
+    # "you can check in again" or a bare "stop" ends it early.
+    "focus_minutes": 25.0,
+    # Greet the FIRST session of each day with one short spoken briefing
+    # drawn from your notes -- what is on your plate, what you last worked
+    # on. OFF by default: a session that launches straight into a speech is
+    # a surprise, so the person turns it on.
+    "daily_briefing": False,
+    # Gentle self-care nudges folded into a check-in: a battery well down
+    # and off the charger, a nearly-full disk, a long unbroken session. OFF
+    # by default, and only ever spoken through a check-in, never on its own.
+    "care_enabled": False,
     # The opencode HTTP server backtalk talks to. It starts its own on
     # this port if nothing is listening, and REUSES a running server if
     # something already is — so starting opencode yourself first is fine
@@ -546,6 +567,9 @@ def load() -> dict:
     cfg["barehands_state_dir"] = _expand(cfg.get("barehands_state_dir", ""))
     # Empty stays empty: that is how journaling is switched off.
     cfg["journal_dir"] = _expand(cfg.get("journal_dir", ""))
+    # Empty stays empty: that is how the spoken "remember this" is switched
+    # off.
+    cfg["remember_dir"] = _expand(cfg.get("remember_dir", ""))
     thinking = _expand(cfg.get("thinking_sound", ""))
     if thinking and not os.path.isabs(thinking):
         thinking = str(REPO / thinking)

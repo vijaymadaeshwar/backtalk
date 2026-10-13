@@ -70,9 +70,10 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
-from backtalk import board, recall, screen, signals, voiceprint
+from backtalk import board, care, recall, screen, signals, voiceprint
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
@@ -1090,6 +1091,120 @@ def recall_request(text):
     return None
 
 
+# The spoken openings that tell the line to KEEP a line. Matched as
+# starts-with after normalization. There is deliberately no bare "remember"
+# -- "remember the time we..." is talk, not a save -- so the opener must be
+# one that means "write this down". The words AFTER the opener are kept
+# verbatim (case and punctuation intact) because they land in a note the
+# person reads back.
+_REMEMBER_ON = (
+    "remember that", "remember this", "make a note of", "make a note",
+    "note down", "note this", "note that", "take a note", "take this down",
+    "write this down", "write that down", "jot this down", "jot that down",
+    "add to my notes", "add a note", "save this", "save that",
+)
+
+
+def remember_request(text):
+    """Read a spoken "remember this" command. Returns the words to keep (the
+    original text after the opener, trimmed of the separator), or None when
+    this is not one. Pure, so the wording is easy to test."""
+    body = text.strip()
+    low = body.lower()
+    for p in _REMEMBER_ON:
+        if low.startswith(p):
+            return body[len(p):].strip(" .,:;!?-\t") or None
+    return None
+
+
+def remember_note(directory, text):
+    """Append one kept line to a per-day markdown file in `directory`,
+    returning the path written. Raises OSError if the folder cannot be
+    written; the caller decides what to say. Side-effect only: backtalk
+    never reads these back, the person's vault does."""
+    path = Path(directory) / f"Remembered {time.strftime('%Y-%m-%d')}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"- {time.strftime('%H:%M')} — {text}\n")
+    return str(path)
+
+
+# The spoken openings that start a focus stretch. The length reuses
+# _quiet_seconds, so "focus for twenty five minutes" and "focus for half an
+# hour" both work; naming no length uses the configured default. A bare
+# "focus" is left out on purpose: "focus the window" is a screen command.
+_FOCUS_ON = (
+    "focus for", "focus mode", "start focus", "start a focus", "start a "
+    "pomodoro", "focus time", "deep work for", "deep work mode",
+    "pomodoro", "do not disturb for", "do not disturb",
+    "dont disturb for", "dont disturb", "quiet mode for", "quiet mode",
+)
+
+
+def focus_request(text, default_minutes):
+    """Read a spoken focus request. Returns whole minutes (at least one) for
+    the stretch, or None when this is not one. Pure."""
+    norm = _norm_speech(text)
+    if not any(norm.startswith(p) for p in _FOCUS_ON):
+        return None
+    secs = _quiet_seconds(norm, (default_minutes or 25) * 60)
+    return max(1, int(round(secs / 60)))
+
+
+# Fed to the brain when the person asks for a briefing, and at launch by an
+# automatic one. The brain already holds the notes; this only frames the
+# shape of the answer -- short, spoken, drawn from what it can actually see.
+_BRIEFING_PROMPT = (
+    "Give the person a short spoken briefing drawn only from what you can "
+    "actually see in their notes and this conversation: what is on their "
+    "plate today, and what they last worked on. Two or three short, warm "
+    "sentences in your own voice. Never read out a file path or markdown, "
+    "and never invent anything you cannot see.")
+_BRIEFING_ON = (
+    "brief me", "give me a briefing", "give me my briefing",
+    "what s on my plate", "whats on my plate", "what is on my plate",
+    "my daily briefing", "daily briefing", "morning briefing",
+    "catch me up",
+)
+
+
+def briefing_request(text):
+    """True when the person is asking for a daily briefing. Pure."""
+    norm = _norm_speech(text)
+    return any(norm == p or norm.startswith(p + " ")
+               for p in _BRIEFING_ON)
+
+
+def briefing_due(last_day, today):
+    """True when a briefing has not yet been given today. Pure."""
+    return last_day != today
+
+
+def briefing_state_path(directory):
+    """(file, today) for the once-a-day briefing marker. Pure."""
+    return str(Path(directory) / ".briefing_day"), time.strftime("%Y-%m-%d")
+
+
+def read_briefing_day(path):
+    """The last day a briefing was given, or "" when none or unreadable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def write_briefing_day(path, day):
+    """Remember the day of the last briefing. Best-effort: a box where the
+    marker cannot be written still gets its briefing."""
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(day)
+    except OSError:
+        log(f"[briefing] could not remember the day in {path}")
+
+
 async def journal_flush(journal: Journal, brain: WarmBrain):
     """Write the session down, then get out of the way.
 
@@ -1283,9 +1398,13 @@ async def amain():
     hold_apps = list(CFG.get("check_in_hold_apps") or [])
     quiet_default = float(CFG.get("check_in_default_quiet", 3600) or 3600)
     followup_window = max(0.0, float(CFG.get("followup_window", 0) or 0))
+    care_enabled = bool(CFG.get("care_enabled"))
     _ACTIVITY = {"at": time.monotonic()}
     _CHECKIN = {"paused_until": 0.0}
     _FOLLOWUP = {"until": 0.0}
+    # When the last self-care nudge was spoken (monotonic), so a hello never
+    # turns into a health report.
+    _CARE = {"at": 0.0}
     # Pending spoken reminders, each {"at": monotonic-deadline, "label": str}.
     # The main wait caps itself at the nearest one so the loop wakes to
     # speak it; nothing else has to poll.
@@ -1293,13 +1412,20 @@ async def amain():
 
     def _check_in_prompt():
         """The check-in prompt, with the last thing they were doing folded
-        in when the activity tracker has seen something. Kept short: the
-        brain has the conversation either way, this is just a nudge."""
+        in when the activity tracker has seen something, and one self-care
+        nudge when care is on and one is due. Kept short: the brain has the
+        conversation either way, this is just a nudge."""
+        prompt = CHECK_IN_PROMPT
         label = _LAST_ACTIVITY["label"]
-        if not label:
-            return CHECK_IN_PROMPT
-        return (CHECK_IN_PROMPT + " For context, the last window you "
-                "noticed them in was " + label + ".")
+        if label:
+            prompt += (" For context, the last window you noticed them in "
+                       "was " + label + ".")
+        if care_enabled:
+            line, _CARE["at"] = care.current_nudge(last=_CARE["at"])
+            if line:
+                prompt += (" If it fits naturally, you might also mention "
+                           "that " + line + ".")
+        return prompt
 
     def _reply_task(coro):
         """Start the reply task and, once it is done, open the follow-up
@@ -1609,6 +1735,51 @@ async def amain():
             mouth.say(line)
             signals.set_state("idle")
             return True
+        # A spoken "remember this ..." is kept in the notes folder and
+        # acknowledged here; it never reaches the brain, which would only
+        # spend a round trip saying "noted". Only claimed when a notes
+        # folder is configured, so a box without one treats it as talk.
+        rmb = remember_request(text) if CFG.get("remember_dir") else None
+        if rmb:
+            try:
+                await loop.run_in_executor(
+                    _BLOCKERS, remember_note, CFG["remember_dir"], rmb)
+                log("[remember] kept a line")
+                mouth.say("Got it. I've written that down.")
+            except OSError:
+                log("[remember] could not write the note")
+                mouth.say("I couldn't write that down. Check the notes "
+                          "folder.")
+            signals.set_state("idle")
+            return True
+        # A spoken focus stretch ("focus for twenty minutes", "start a
+        # pomodoro") quiets the line and leaves one reminder for the break,
+        # reusing the check-in pause and the reminder queue rather than a
+        # clock of its own. "you can check in again" or a bare "stop" ends
+        # it early.
+        fq = focus_request(text, CFG.get("focus_minutes", 25))
+        if fq:
+            until = time.monotonic() + fq * 60
+            _CHECKIN["paused_until"] = until
+            _REMINDERS.append({"at": until, "label": "break time"})
+            log(f"[focus] quiet for {fq} min")
+            mouth.say("Okay, focusing for " + _human_span(fq * 60) +
+                      ". I'll keep quiet until it's time for a break.")
+            signals.set_state("idle")
+            return True
+        # A spoken "brief me" goes to the brain framed as a briefing, so the
+        # answer is drawn from the notes the brain already holds rather than
+        # from a template here.
+        if briefing_request(text):
+            log("[briefing] asked")
+            signals.set_state("thinking")
+            signals.static_start()
+            _deny_pending()
+            await brain.reset_turn()
+            _reply_task(
+                speak_reply(brain, mouth, _BRIEFING_PROMPT,
+                            on_reply=journal.say_agent))
+            return True
         verb = verb or console_match(text)
         if verb and verb != "look":
             await run_console(verb)
@@ -1656,6 +1827,21 @@ async def amain():
             mouth.say(_reminder_line(r["label"]))
         signals.set_state("idle")
         log(f"[reminder] spoke {len(due)}")
+
+    # An automatic briefing, once per day, on the first launch of the day,
+    # when the person has switched it on. Off by default: a session that
+    # launches straight into a speech is a surprise. The spoken "brief me"
+    # works either way.
+    if CFG.get("daily_briefing"):
+        bpath, today = briefing_state_path(CFG.get("signals_dir") or ".")
+        if briefing_due(read_briefing_day(bpath), today):
+            write_briefing_day(bpath, today)
+            log("[briefing] first launch today")
+            _deny_pending()
+            await brain.reset_turn()
+            _reply_task(
+                speak_reply(brain, mouth, _BRIEFING_PROMPT,
+                            on_reply=journal.say_agent))
 
     try:
         # ONE loop, two mic modes, switchable live (_MIC). The talk key
