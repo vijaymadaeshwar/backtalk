@@ -1129,6 +1129,59 @@ def remember_note(directory, text):
     return str(path)
 
 
+# The spoken questions that ask to HEAR BACK what was kept -- the counterpart
+# to "remember this". Read from the same Remembered notes, newest first.
+_REMEMBERED_ON = (
+    "what did i ask you to remember", "what did i tell you to remember",
+    "what have i asked you to remember", "what did i ask you to note",
+    "read me what i asked you to remember", "read back what i told you",
+    "read me my notes", "read me the notes", "read me my remembered notes",
+    "what do you have in my notes", "what s in my notes",
+    "whats in my notes", "what s in the inbox",
+)
+
+
+def remembered_request(text):
+    """True when the person is asking to hear back what was kept. Pure."""
+    norm = _norm_speech(text)
+    return any(norm == p or norm.startswith(p + " ") for p in _REMEMBERED_ON)
+
+
+def read_remembered(directory, limit=3):
+    """The last few kept lines, newest first, from the "Remembered" notes in
+    `directory`. [] when there is nothing to read. Never raises: a folder
+    that is missing, or a note that will not open, is simply skipped."""
+    if not directory:
+        return []
+    lines = []
+    for path in sorted(Path(directory).glob("Remembered *.md"), reverse=True):
+        try:
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            continue
+        for raw in reversed(content.splitlines()):
+            body = raw.strip().lstrip("-").strip()
+            if not body:
+                continue
+            if " — " in body:
+                body = body.split(" — ", 1)[1].strip()
+            lines.append(body)
+            if len(lines) >= limit:
+                return lines
+    return lines
+
+
+def spoken_remembered(items):
+    """One spoken line for what the person asked to be remembered. Pure."""
+    if not items:
+        return "You haven't asked me to remember anything yet."
+    if len(items) == 1:
+        return "You asked me to remember this: " + items[0] + "."
+    joined = "; ".join(items[:-1]) + ", and " + items[-1]
+    return "Here's what you asked me to remember: " + joined + "."
+
+
 # The spoken openings that start a focus stretch. The length reuses
 # _quiet_seconds, so "focus for twenty five minutes" and "focus for half an
 # hour" both work; naming no length uses the configured default. A bare
@@ -1750,6 +1803,16 @@ async def amain():
                 log("[remember] could not write the note")
                 mouth.say("I couldn't write that down. Check the notes "
                           "folder.")
+            signals.set_state("idle")
+            return True
+        # A spoken "what did I ask you to remember?" reads the kept lines
+        # back, newest first. Only claimed when a notes folder is set, and
+        # never sent to the brain: the notes are right here on disk.
+        if CFG.get("remember_dir") and remembered_request(text):
+            items = await loop.run_in_executor(
+                _BLOCKERS, read_remembered, CFG["remember_dir"])
+            log(f"[remember] read back {len(items)}")
+            mouth.say(spoken_remembered(items))
             signals.set_state("idle")
             return True
         # A spoken focus stretch ("focus for twenty minutes", "start a

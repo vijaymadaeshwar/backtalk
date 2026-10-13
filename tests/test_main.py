@@ -2229,6 +2229,81 @@ def remember_and_focus():
           mouth2.said)
 
 
+def remembered_readback():
+    print("\n--- read-back: the pure bits ---")
+    q = btmain.remembered_request
+    check("what did i ask you to remember is a read-back",
+          q("what did i ask you to remember") is True)
+    check("read me my notes is a read-back", q("read me my notes") is True)
+    check("what's in my notes is a read-back",
+          q("what's in my notes") is True)
+    check("remember that X is not a read-back",
+          q("remember that the door is locked") is False)
+    check("ordinary talk is not a read-back", q("how was your day") is False)
+
+    s = btmain.spoken_remembered
+    check("nothing kept is admitted plainly",
+          s([]) == "You haven't asked me to remember anything yet.")
+    check("one kept line is read alone",
+          s(["call the dentist"]) == "You asked me to remember this: "
+          "call the dentist.")
+    check("several kept lines are read in one breath",
+          s(["call the dentist", "buy milk"])
+          == "Here's what you asked me to remember: call the dentist, and "
+          "buy milk.")
+
+    with tempfile.TemporaryDirectory() as td:
+        check("an empty folder reads back nothing",
+              btmain.read_remembered(td) == [])
+        check("no folder at all reads back nothing",
+              btmain.read_remembered("") == [])
+        older = os.path.join(td, "Remembered 2026-10-12.md")
+        newer = os.path.join(td, "Remembered 2026-10-13.md")
+        with open(newer, "w", encoding="utf-8") as f:
+            f.write("- 09:00 \u2014 the morning thing\n"
+                    "- 17:00 \u2014 the newer thing\n"
+                    "\n")
+        with open(older, "w", encoding="utf-8") as f:
+            f.write("- 09:00 \u2014 the older thing\n"
+                    "- plain line with no separator\n")
+        got = btmain.read_remembered(td, limit=10)
+        check("the newest note and its newest line come first",
+              got[0] == "the newer thing", got)
+        check("the blank line is skipped, the separator is dropped",
+              got == ["the newer thing", "the morning thing",
+                      "plain line with no separator", "the older thing"], got)
+        check("the limit is honoured",
+              btmain.read_remembered(td, limit=1) == ["the newer thing"])
+        os.mkdir(os.path.join(td, "Remembered 2026-01-01.md"))
+        check("a note that will not open is skipped, not fatal",
+              btmain.read_remembered(td, limit=10) == got)
+
+    print("\n--- amain: a spoken read-back reads the kept notes ---")
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, "Remembered 2026-10-13.md"), "w",
+                  encoding="utf-8") as f:
+            f.write("- 08:00 \u2014 call the dentist at four\n")
+        mouth, _, res = _run_amain(
+            ["what did i ask you to remember", "goodbye seyon"],
+            cfg_extra={"remember_dir": td})
+        check("the read-back run hangs up cleanly",
+              res["exit"] is None and not res["timeout"], res)
+        brain = _LoopBrain.instances[-1]
+        check("a read-back never reaches the brain",
+              "what did i ask you to remember" not in brain.got, brain.got)
+        check("the kept line is read aloud",
+              any("call the dentist at four" in s for s in mouth.said),
+              mouth.said)
+
+    with tempfile.TemporaryDirectory() as td:
+        mouth, _, res = _run_amain(
+            ["what did i ask you to remember", "goodbye seyon"],
+            cfg_extra={"remember_dir": td})
+        check("an empty notes folder is admitted",
+              any("haven't asked me to remember" in s for s in mouth.said),
+              mouth.said)
+
+
 def briefing_cases():
     print("\n--- briefing: the pure bits ---")
     b = btmain.briefing_request
@@ -2448,6 +2523,7 @@ board_control()
 recall_text()
 recall()
 remember_and_focus()
+remembered_readback()
 briefing_cases()
 care_cases()
 voice_enrollment()
