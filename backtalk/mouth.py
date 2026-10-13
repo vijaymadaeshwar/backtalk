@@ -519,6 +519,29 @@ def synth_stream(text: str, timeout: float = 30.0):
     log("[mouth] no engine could speak this reply")
 
 
+def _default_output() -> int | None:
+    """The index of the system's current default OUTPUT device, or None for
+    "whatever the system calls default". Read fresh on every stream open,
+    never cached, and that is the point of it.
+
+    On Windows a Bluetooth headset becomes the default output the moment it
+    connects and stops being it when it goes away, so FOLLOWING the default
+    is exactly the behaviour wanted here -- speak through the Bluetooth when
+    it is there, through the normal speakers when it is not -- without
+    naming a device or configuring anything. An unreadable default, or a
+    lone -1 (Windows for "no device"), reads as None so the system default
+    still applies.
+    """
+    try:
+        dev = sd.default.device
+    except Exception:
+        return None
+    out = dev[1] if isinstance(dev, (list, tuple)) and len(dev) > 1 else dev
+    if isinstance(out, int) and out >= 0:
+        return out
+    return None
+
+
 class Mouth:
     def __init__(self):
         from backtalk.ducking import Ducker
@@ -529,6 +552,7 @@ class Mouth:
         # Worker-thread-only — never touch from other threads.
         self._out: sd.OutputStream | None = None
         self._out_rate: int | None = None
+        self._out_dev: int | None = None
         self.ducker = Ducker()  # public: PTT ducks for the USER's voice too
         # Barge-in epoch and the count of queued-but-not-yet-finished
         # utterances, both guarded by _lock. The epoch is how a sentence the
@@ -673,10 +697,14 @@ class Mouth:
             signals.set_state("idle")
 
     def _get_out(self, rate: int) -> sd.OutputStream:
-        """The long-lived stream (audio law #1). Reopened only when the
-        sample rate changes (ElevenLabs 44.1k <-> Kokoro 24k fallback:
-        rare, costs at most one blip on the switch)."""
-        if self._out is not None and self._out_rate == rate:
+        """The long-lived stream (audio law #1). Reopened when the sample
+        rate changes (ElevenLabs 44.1k <-> Kokoro 24k fallback), and when
+        the system's default OUTPUT device changes -- so a Bluetooth
+        headset that connects mid-session takes the next sentence, and the
+        normal speakers take it back once it disconnects."""
+        dev = _default_output()
+        if (self._out is not None and self._out_rate == rate
+                and self._out_dev == dev):
             # Guarded, because the stream can die UNDER us: the ears
             # rebuild the whole audio system to recover from a device
             # change (see ears._reopen_after_device_change), and that
@@ -691,8 +719,10 @@ class Mouth:
             except Exception:
                 log("[mouth] the output stream went away, reopening")
         self._drop_out()
-        self._out = sd.OutputStream(samplerate=rate, channels=1, dtype="int16")
+        self._out = sd.OutputStream(samplerate=rate, channels=1,
+                                    dtype="int16", device=dev)
         self._out_rate = rate
+        self._out_dev = dev
         self._out.start()
         return self._out
 
@@ -723,6 +753,7 @@ class Mouth:
                 pass
         self._out = None
         self._out_rate = None
+        self._out_dev = None
 
     def _play_stream(self, sentence: str, directions=None, block: int = 2205,
                      prebuffer_s: float | None = None):

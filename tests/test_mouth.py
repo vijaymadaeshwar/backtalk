@@ -425,6 +425,58 @@ def streams():
           first is dead and second is fresh)
     check("the dead stream is closed on the way out", dead.closed)
 
+    # A changed default output (a Bluetooth headset connecting, or leaving)
+    # must move the next sentence onto the new device.
+    m4 = quiet_mouth()
+    made4 = []
+
+    def new_stream4(**k):
+        s = FakeOut()
+        s.device = k.get("device")
+        made4.append(s)
+        return s
+
+    defaults = iter([10, 10, 20])  # the default flips on the third open
+    with mock.patch.object(mouth, "_default_output",
+                           side_effect=lambda: next(defaults)), \
+         mock.patch.object(mouth.sd, "OutputStream", side_effect=new_stream4):
+        m4._get_out(24000)
+        m4._get_out(24000)
+        m4._get_out(24000)
+    check("a changed default device reopens the stream", len(made4) == 2,
+          len(made4))
+    check("the rebuilt stream targets the new default",
+          made4[-1].device == 20, made4[-1].device)
+
+
+def default_output():
+    print("\n--- _default_output: which speaker the system means ---")
+
+    class Holder:
+        def __init__(self, device):
+            self.device = device
+
+    def resolve(device):
+        with mock.patch.object(mouth.sd, "default", Holder(device)):
+            return mouth._default_output()
+
+    check("an (input, output) pair yields the output index",
+          resolve((1, 4)) == 4, resolve((1, 4)))
+    check("a lone index is the output", resolve(4) == 4, resolve(4))
+    check("a one-item sequence is not an output", resolve((4,)) is None)
+    check("Windows' -1 reads as no device", resolve((1, -1)) is None)
+    check("a non-index output reads as no device",
+          resolve(("a", "b")) is None)
+
+    class Boom:
+        @property
+        def device(self):
+            raise RuntimeError("no default")
+
+    with mock.patch.object(mouth.sd, "default", Boom()):
+        check("an unreadable default reads as no device",
+              mouth._default_output() is None)
+
 
 def teardown_paths():
     print("\n--- _cut / _drop_out ---")
@@ -1116,6 +1168,7 @@ sweep()
 queue_behaviour()
 worker_loop()
 streams()
+default_output()
 teardown_paths()
 playback()
 turn_language()
