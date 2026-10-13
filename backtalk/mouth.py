@@ -725,11 +725,15 @@ class Mouth:
         self._out_rate = None
 
     def _play_stream(self, sentence: str, directions=None, block: int = 2205,
-                     prebuffer_s: float = 0.75):
+                     prebuffer_s: float | None = None):
         """Stream-synthesize and play with the head-start buffer (audio
         law #2). stop() reacts ~50ms. The sample rate comes from
-        whichever engine actually answered."""
+        whichever engine actually answered. The head start is configurable
+        (prebuffer_s); None takes the configured value, which is small by
+        default so the first word is not held back."""
         from backtalk import signals
+        if prebuffer_s is None:
+            prebuffer_s = float(CFG.get("prebuffer_s", 0.5))
         gen = synth_stream(sentence)
         head: list = []
         banked = 0

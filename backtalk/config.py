@@ -173,6 +173,12 @@ DEFAULTS = {
     # (roughly 0.7 to 1.5). ElevenLabs pace lives in the master chain's
     # atempo instead. (Grew out of a community proposal, issue #1.)
     "speed": 1.0,
+    # How much synthesized audio to bank BEFORE playback starts, in
+    # seconds. It is a head start against a synthesizer that cannot always
+    # keep up with realtime: too small and the voice can gape mid-sentence,
+    # too large and the reply starts late. 0.5 is the responsive default;
+    # raise it toward 0.75-1.0 only if you hear gaps on a weak machine.
+    "prebuffer_s": 0.5,
     # Resume the previous conversation on launch. OFF by default: a
     # fresh session every launch is the predictable behavior. Set true
     # and backtalk saves the session id after every completed turn
@@ -220,8 +226,12 @@ DEFAULTS = {
     "stt_model": "small",
     # Used instead of stt_model once its weights are already on this
     # machine. Set to a model you have downloaded; until then the smaller
-    # one is used so the first utterance never waits on a fetch.
-    "stt_model_if_cached": "medium",
+    # one is used so the first utterance never waits on a fetch. It
+    # defaults to the same model as stt_model on purpose: a bigger cached
+    # model transcribes more accurately but SLOWER, and losing that much
+    # per-turn latency for a voice line is a bad trade. Set it to "medium"
+    # only if you would rather have accuracy than speed.
+    "stt_model_if_cached": "small",
     # Fetch live facts in code for time-sensitive questions, so the model
     # never has to answer about the present out of its own memory.
     "live_data": True,

@@ -198,9 +198,12 @@ def test_bad_shapes_are_safe():
 def test_numeric_settings_are_coerced():
     print("\n--- numeric knobs are coerced; a bad one falls back ---")
     cfg = load_with({"speed": "1.25", "opencode_port": "4600",
-                     "turn_timeout": True, "stt_min_rms": "loud"})
+                     "turn_timeout": True, "stt_min_rms": "loud",
+                     "prebuffer_s": "0.4"})
     check("a number written as a string is honoured",
           cfg["speed"] == 1.25, cfg["speed"])
+    check("the prebuffer knob is coerced too",
+          cfg["prebuffer_s"] == 0.4, cfg["prebuffer_s"])
     check("an int default yields an int",
           cfg["opencode_port"] == 4600
           and isinstance(cfg["opencode_port"], int), cfg["opencode_port"])
