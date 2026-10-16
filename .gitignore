@@ -9,6 +9,10 @@ logs/
 # conversation -- noisy forever, and enough to make an update script believe
 # they had local edits. An enumerated list goes stale the day the code grows.
 .voice_*
+# The resumed-session pointer and the daily-briefing marker live in signals_dir
+# (the repo root by default) too; per-machine runtime state, never code.
+.backtalk_session
+.briefing_day
 backtalk.egg-info/
 # your personal config, created at setup: never tracked, never touched by updates
 backtalk.json

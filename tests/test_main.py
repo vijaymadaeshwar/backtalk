@@ -1216,11 +1216,14 @@ def amain_loop():
     check("and says so out loud",
           any("brain" in s.lower() for s in mouth2.said), mouth2.said)
 
-    mouth3, _, res3 = _run_amain(
-        ["goodbye seyon"],
-        cfg_extra={"wake_word": True, "wake_word_phrases": [],
-                   "resume_last_session": True},
-        argv=["--wake-word"])
+    import backtalk.brain as btbrain
+    missing = str(Path(tempfile.gettempdir()) / "backtalk-no-such-session")
+    with mock.patch.object(btbrain, "SESSION_FILE", missing):
+        mouth3, _, res3 = _run_amain(
+            ["goodbye seyon"],
+            cfg_extra={"wake_word": True, "wake_word_phrases": [],
+                       "resume_last_session": True},
+            argv=["--wake-word"])
     check("wake word with no phrases falls back quietly",
           res3["exit"] is None and not res3["timeout"], res3)
     check("the fallback still hangs up on the phrase",
